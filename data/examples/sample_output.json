@@ -1,0 +1,93 @@
+[
+  {
+    "text": "ho đờm xanh",
+    "position": [35, 46],
+    "type": "TRIỆU_CHỨNG",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "tức ngực",
+    "position": [48, 56],
+    "type": "TRIỆU_CHỨNG",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "đau thượng vị",
+    "position": [58, 72],
+    "type": "TRIỆU_CHỨNG",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "ợ hơi",
+    "position": [74, 79],
+    "type": "TRIỆU_CHỨNG",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "bệnh trào ngược dạ dày - thực quản",
+    "position": [99, 134],
+    "type": "CHẨN_ĐOÁN",
+    "assertions": [],
+    "candidates": ["K21.0", "K21.9"]
+  },
+  {
+    "text": "Chlorpheniramine 0.4 MG/ML",
+    "position": [168, 194],
+    "type": "THUỐC",
+    "assertions": ["isHistorical"],
+    "candidates": ["360047"]
+  },
+  {
+    "text": "Capsaicin 0.38 MG/ML",
+    "position": [196, 216],
+    "type": "THUỐC",
+    "assertions": ["isHistorical"],
+    "candidates": ["1660761"]
+  },
+  {
+    "text": "WBC",
+    "position": [278, 281],
+    "type": "TÊN_XÉT_NGHIỆM",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "14,43",
+    "position": [282, 287],
+    "type": "KẾT_QUẢ_XÉT_NGHIỆM",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "NEUT% (Tỷ lệ % bạch cầu trung tính)",
+    "position": [289, 326],
+    "type": "TÊN_XÉT_NGHIỆM",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "76,4",
+    "position": [327, 331],
+    "type": "KẾT_QUẢ_XÉT_NGHIỆM",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "LYPH% (Tỷ lệ bạch cầu lympho)",
+    "position": [333, 363],
+    "type": "TÊN_XÉT_NGHIỆM",
+    "assertions": [],
+    "candidates": []
+  },
+  {
+    "text": "12,8",
+    "position": [364, 368],
+    "type": "KẾT_QUẢ_XÉT_NGHIỆM",
+    "assertions": [],
+    "candidates": []
+  }
+]

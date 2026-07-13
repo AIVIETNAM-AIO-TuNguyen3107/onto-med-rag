@@ -1,0 +1,8 @@
+# Large or competition-provided data — do not commit
+kb/
+test/input/*.txt
+raw/
+processed/
+
+# Keep directory structure
+!.gitkeep

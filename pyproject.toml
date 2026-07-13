@@ -1,0 +1,15 @@
+[project]
+name = "onto-med-rag"
+version = "0.1.0"
+description = "Vietnamese clinical NLP — NER, assertion detection, ICD-10/RxNorm linking"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gdown>=5.0",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+package = false
