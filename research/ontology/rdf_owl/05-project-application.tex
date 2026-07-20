@@ -1,0 +1,268 @@
+\section{Application to \texttt{onto-med-rag}}
+
+This section connects the concepts above to our competition project
+(\textbf{Bài 2 --- Ontological Reasoning in Medical Knowledge Retrieval}):
+Vietnamese clinical text in, structured entities with ICD-10/RxNorm codes out.
+
+\subsection{Project goal in ontology terms}
+
+The competition asks us to turn unstructured clinical notes into a \emph{knowledge
+graph fragment} per document:
+
+\begin{itemize}
+  \item \textbf{Entities} --- symptoms, diagnoses, drugs, lab tests, results;
+  \item \textbf{Relationships} --- (Phase 2+) links between concepts in the same note;
+  \item \textbf{Shared meaning} --- Vietnamese surface forms mapped to ICD-10 and
+        RxNorm via global identifiers;
+  \item \textbf{Reasoning} --- assertions (negation, family, history) and, later,
+        inferred links between concepts.
+\end{itemize}
+
+These are exactly the four patterns from Table~\ref{tab:kg-patterns}, applied to
+clinical NLP rather than enterprise CRM/ERP data.
+
+\subsection{Pipeline mapped to semantic layers}
+
+Our Phase~1 pipeline (\texttt{docs/architecture.md}) and where ontology technology
+fits:
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Pipeline stages and ontology role}
+  \label{tab:pipeline-ontology}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l l X@{}}
+    \toprule
+    \textbf{Stage} & \textbf{Module} & \textbf{Ontology connection} \\
+    \midrule
+    NER & \texttt{src/ner/} &
+    Extract entity \emph{spans} --- the raw mentions that will become RDF subjects \\
+    Classification & \texttt{src/classification/} &
+    Assign RDF \emph{types} (\texttt{:Diagnosis}, \texttt{:Drug}, \texttt{:Symptom}, \ldots) \\
+    Assertion detection & \texttt{src/assertion/} &
+    Context flags as \emph{metadata on triples} (negated vs.\ active condition) \\
+    Entity linking & \texttt{src/linking/} &
+    Map Vietnamese text to ICD-10/RxNorm IRIs (\texttt{owl:sameAs}, synonyms) \\
+    Candidate ranking & \texttt{src/ranking/} &
+    Filter/rank using KB hierarchies (\texttt{rdfs:subClassOf}, disjointness) \\
+    Output & \texttt{src/schemas/} &
+    JSON entities $\approx$ a serialised ABox view of the graph \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Phase~1 deliberately keeps ontology \emph{light}: ICD-10 and RxNorm act as structured
+knowledge sources behind linking and ranking, not a full OWL reasoner
+(\texttt{docs/architecture.md}). Phase~2+ adds relationship inference and deeper
+ontological reasoning --- the competition name's long-term direction.
+
+\newpage
+\subsection{Output JSON as RDF triples}
+
+Each predicted entity in \texttt{output/\{id\}.json} can be read as one or more
+RDF triples. Take a diagnosis from our sample data
+(\texttt{data/examples/sample\_output.json}):
+
+\begin{verbatim}
+# Surface form extracted by NER
+:mention-trào-ngược a :Diagnosis ;
+    :surfaceForm "bệnh trào ngược dạ dày - thực quản" ;
+    :charOffset "99-134" .
+
+# Linked to standard codes (candidates)
+:mention-trào-ngược owl:sameAs icd:K21.0 .
+:mention-trào-ngược owl:sameAs icd:K21.9 .
+
+# ICD-10 hierarchy (from KB, not in JSON today)
+icd:K21.0 rdfs:subClassOf icd:K21 .
+icd:K21   rdfs:subClassOf icd:K20-K31 .
+\end{verbatim}
+
+A drug with historical assertion:
+
+\begin{verbatim}
+:mention-chlor a :Drug ;
+    :surfaceForm "Chlorpheniramine 0.4 MG/ML" ;
+    :hasAssertion :isHistorical .
+
+:mention-chlor owl:sameAs rxnorm:360047 .
+\end{verbatim}
+
+The JSON schema (\texttt{src/schemas/entity.py}) is therefore a \textbf{projection}
+of an RDF graph: fields \texttt{text}, \texttt{position}, \texttt{type},
+\texttt{assertions}, and \texttt{candidates} map to literals, classes, annotation
+properties, and external IRIs respectively.
+
+\subsection{Entity types and knowledge bases}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Competition entity types mapped to ontology and KB}
+  \label{tab:entity-kb}
+  \renewcommand{\arraystretch}{1.15}
+  \begin{tabularx}{\textwidth}{@{}l l l@{}}
+    \toprule
+    \textbf{JSON \texttt{type}} & \textbf{OWL class (example)} & \textbf{KB / codes} \\
+    \midrule
+    \texttt{CHẨN\_ĐOÁN} & \texttt{:Diagnosis} & ICD-10 (\texttt{data/kb/icd10/}) \\
+    \texttt{THUỐC} & \texttt{:Drug} & RxNorm (\texttt{data/kb/rxnorm/}) \\
+    \texttt{TRIỆU\_CHỨNG} & \texttt{:Symptom} & --- (assertions only) \\
+    \texttt{TÊN\_XÉT\_NGHIỆM} & \texttt{:LabTest} & --- \\
+    \texttt{KẾT\_QUẢ\_XÉT\_NGHIỆM} & \texttt{:LabResult} & --- \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\textbf{Pattern 3 (shared meaning)} applies directly: ``trào ngược dạ dày - thực
+quản'' (Vietnamese note) and ICD code \texttt{K21.0} (Gastro-esophageal reflux
+disease with esophagitis) must refer to the same concept. RDF IRIs and
+\texttt{owl:sameAs} are the standard way to unify surface text with standard
+terminologies --- the same problem Bryon Jacob describes for \texttt{Client =
+Customer = Account}, but with clinical vocabularies
+(\href{https://bryon.io/why-rdf-is-the-natural-knowledge-layer-for-ai-systems-a5fd0b43d4c5}{Part~1 of the series}).
+
+\newpage
+\subsection{Assertions as semantic context}
+
+Assertions change \emph{meaning}, not just labels:
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Assertion flags and clinical interpretation}
+  \label{tab:assertions}
+  \renewcommand{\arraystretch}{1.15}
+  \begin{tabularx}{\textwidth}{@{}l X@{}}
+    \toprule
+    \textbf{Assertion} & \textbf{Why an ontology layer helps} \\
+    \midrule
+    \texttt{isNegated} &
+    ``không ho'' --- symptom present in text but \emph{not} attributed to patient;
+    reasoner/QA must not treat as active finding \\
+    \texttt{isFamily} &
+    Condition belongs to a relative, not the patient --- disjoint patient vs.\ family
+    context \\
+    \texttt{isHistorical} &
+    Past drug use or diagnosis --- temporal/context metadata on the triple \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+OWL can express constraints (e.g.\ a negated diagnosis is not an active
+\texttt{:Diagnosis} for treatment planning). Even in Phase~1, encoding assertions
+explicitly avoids the LLM ``guessing'' foreign-key-style semantics that the Bryon
+series warns about for SQL schemas.
+
+\subsection{Where RDFS and OWL help next}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Near-term ontology use by project phase}
+  \label{tab:phase-roadmap}
+  \renewcommand{\arraystretch}{1.15}
+  \begin{tabularx}{\textwidth}{@{}l X@{}}
+    \toprule
+    \textbf{Phase} & \textbf{Ontology / tool use} \\
+    \midrule
+    Phase~1 (now) &
+    Load ICD-10/RxNorm as lookup graphs; dictionary + retrieval linking;
+    optional Turtle export of predictions for debugging \\
+    Phase~2 &
+    Infer relationships between entities in one note
+    (\texttt{symptom} $\rightarrow$ \texttt{associatedWith} $\rightarrow$
+    \texttt{diagnosis}); SPARQL over document graphs \\
+    Phase~3+ &
+    Owlready2 overlay ontology for Vietnamese clinical terms;
+    \texttt{sync\_reasoner()} validation; LLM orchestrates NER while reasoner
+    handles transitivity (e.g.\ drug class $\rightarrow$ ingredient) and consistency \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Concrete OWL patterns from Section~3 that apply to medical linking:
+
+\begin{itemize}
+  \item \texttt{rdfs:subClassOf} --- ICD-10 hierarchy for ranking candidates
+        (prefer specific codes, expand to parents when ambiguous);
+  \item \texttt{owl:equivalentClass} / \texttt{owl:sameAs} --- Vietnamese synonyms
+        and RxNorm concepts;
+  \item \texttt{owl:TransitiveProperty} --- ``ingredient $\rightarrow$ drug class
+        $\rightarrow$ therapeutic category'' in RxNorm;
+  \item \texttt{owl:disjointWith} --- a \texttt{:Symptom} is not a \texttt{:Diagnosis}
+        (classification sanity checks).
+\end{itemize}
+
+\newpage
+\subsection{Owlready2 in our workflow}
+
+For \texttt{onto-med-rag}, Owlready2 (Section~4) is the Python library for
+anything we build beyond flat KB files:
+
+\begin{enumerate}
+  \item \texttt{uv add owlready2} --- add to \texttt{pyproject.toml}.
+  \item Load or create \texttt{data/kb/clinical\_overlay.owl}; mirror ICD-10/RxNorm
+        subsets relevant to the test set.
+  \item Define classes for our five entity types and object properties for future
+        relationship extraction; set Vietnamese \texttt{label}s on individuals.
+  \item Map surface forms to ICD/RxNorm via \texttt{mapsToICD} /
+        \texttt{mapsToRxNorm} properties or \texttt{owl:sameAs} equivalents.
+  \item \texttt{sync\_reasoner()} --- catch unsatisfiable classes before linking
+        code depends on the ontology.
+  \item \texttt{onto.save()} and/or SPARQL queries from \texttt{src/linking/} and
+        \texttt{src/ranking/}.
+\end{enumerate}
+
+Example sketch aligned with our JSON schema:
+
+\begin{small}
+\begin{verbatim}
+from owlready2 import *
+
+onto = get_ontology("http://onto-med-rag.example/clinical.owl")
+
+with onto:
+    class Diagnosis(Thing): pass
+    class Drug(Thing): pass
+    class icd10_code(Thing): pass
+    class rxnorm_code(Thing): pass
+    class hasCandidate(ObjectProperty): pass
+
+    d = Diagnosis("mention_trào_ngược")
+    d.label = ["bệnh trào ngược dạ dày - thực quản"]
+    k21 = icd10_code("K21.0")
+    d.hasCandidate = [k21]
+
+onto.save("data/kb/clinical_overlay.owl")
+\end{verbatim}
+\end{small}
+
+\subsection{End-to-end picture}
+
+\begin{small}
+\begin{verbatim}
+Vietnamese clinical text (.txt)
+        |
+        v
+   [NER + classifier]  -->  mentions with types (RDF subjects)
+        |
+        v
+   [Assertion module]  -->  context on triples
+        |
+        v
+   [Linking + ranking] -->  ICD-10 / RxNorm IRIs (global identity)
+        |
+        v
+   output/{id}.json    -->  serialised ABox (Phase 1 deliverable)
+        |
+        v  (Phase 2+)
+   RDF graph + OWL reasoner -->  inferred relationships, validated QA/RAG
+\end{verbatim}
+\end{small}
+
+\textbf{Summary:} Sections~1--4 describe general patterns and tools; this project
+instantiates them on Vietnamese EHR-style text, ICD-10, and RxNorm. Phase~1 ships
+accurate JSON linking; the ontology stack is the path to Phase~2 relationship
+inference and trustworthy medical retrieval without rebuilding RDF piecemeal.

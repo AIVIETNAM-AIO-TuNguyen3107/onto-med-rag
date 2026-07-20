@@ -1,0 +1,106 @@
+\section{RDF}
+
+\subsection{What is RDF?}
+
+RDF (Resource Description Framework) is a W3C standard for representing and
+sharing data on the Web. It models information as a graph of
+\textbf{triples}, where each statement has the form:
+
+\[
+  \textbf{subject} \rightarrow \textbf{predicate} \rightarrow \textbf{object}
+\]
+
+The three components represent:
+\begin{itemize}
+  \item \textbf{Subject}: the resource being described;
+  \item \textbf{Predicate}: the relationship or property;
+  \item \textbf{Object}: another resource or a literal value.
+\end{itemize}
+
+\paragraph{Example}
+
+The statement ``Alice works for Acme'' is represented in RDF as:
+
+\begin{verbatim}
+:Alice :worksFor :Acme .
+\end{verbatim}
+
+Here, \texttt{:Alice} is the subject, \texttt{:worksFor} is the predicate,
+and \texttt{:Acme} is the object.
+
+By representing data as connected triples, RDF enables information from
+different sources to be integrated into a knowledge graph.
+
+\subsection{Advantages of RDF}
+
+\begin{itemize}
+  \item \textbf{Unique identity:} RDF uses IRIs to provide globally unique
+        identifiers, allowing the same entity to be recognized across different
+        systems.
+
+  \item \textbf{Data integration:} RDF connects data from multiple sources
+        into a unified knowledge graph, reducing data silos.
+
+  \item \textbf{Semantic representation:} RDF represents information as
+        subject--predicate--object triples, making relationships explicit and
+        machine-understandable.
+
+  \item \textbf{Interoperability:} RDF uses Web standards (IRIs and shared
+        vocabularies), allowing different applications to exchange and reuse data.
+
+  \item \textbf{Flexibility and extensibility:} New facts and relationships
+        can be added easily without redesigning the data model.
+
+  \item \textbf{Support for AI and reasoning:} RDF graphs allow systems to
+        discover relationships and infer new knowledge.
+
+        \textit{Example:} An employee can be identified and connected across
+        different enterprise systems:
+
+        \begin{verbatim}
+    hr:employee12345 a :Employee ;
+        :name "Alice Johnson" ;
+        :worksFor company:Acme .
+
+    it:staff-ajohnson owl:sameAs hr:employee12345 .
+
+    company:Acme :locatedIn :Singapore .
+    \end{verbatim}
+
+        Here, RDF links the same employee from HR and IT systems using a unique
+        identifier, integrates information from different sources, represents
+        meaningful relationships, and allows reasoning systems to infer that
+        Alice works for a company located in Singapore.
+\end{itemize}
+
+\subsection{Practical Challenges of Implementing RDF}
+
+\begin{itemize}
+  \item \textbf{Relationship modeling:} RDF does not treat relationships as
+        first-class entities, making it difficult to represent multiple
+        relationships of the same type or attach properties to relationships.
+
+  \item \textbf{Performance:} Large RDF graphs can become expensive to query
+        and process compared with traditional databases.
+
+  \item \textbf{Ontology complexity:} Designing and maintaining standard
+        ontologies requires significant time, expertise, and resources.
+
+  \item \textbf{Domain evolution:} Ontologies may become outdated because
+        business domains change faster than they can be updated.
+
+        \textit{Example:} In a company's knowledge graph, representing employees
+        and their projects may require complex modeling:
+
+        \begin{verbatim}
+    :Alice :worksOn :ProjectA .
+    :Alice :worksOn :ProjectB .
+    \end{verbatim}
+
+        If each relationship needs additional information, such as role, start
+        date, or project status, RDF requires extra nodes and triples to represent
+        the relationship. As the graph grows with more employees, projects, and
+        evolving business rules, queries become more complex and slower. Maintaining
+        an ontology that accurately reflects changing company structures also
+        requires continuous effort.
+\end{itemize}
