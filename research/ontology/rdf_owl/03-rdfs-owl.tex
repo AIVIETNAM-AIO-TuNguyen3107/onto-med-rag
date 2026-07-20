@@ -1,0 +1,226 @@
+\section{RDFS and OWL}
+
+\subsection{From facts to knowledge}
+
+RDF triples express \emph{facts}, but facts alone are not always \emph{knowledge}.
+The difference is \textbf{inference}: deriving statements that were never explicitly
+written---for example, knowing Alice is an \texttt{Employee} because she
+\texttt{worksFor} TechCorp, even if nobody typed \texttt{a :Employee}.
+
+RDF Schema (RDFS) and the Web Ontology Language (OWL) are the semantic layers that
+turn raw RDF into structured knowledge that both machines and LLMs can reason over
+(\href{https://bryon.io/from-facts-to-knowledge-the-layer-cake-of-rdfs-and-owl-e84819d8075d}{Bryon Jacob, 2025}).
+
+\subsection{The Semantic Web layer cake}
+
+Tim Berners-Lee described the Semantic Web as a stack of layers, each building on
+the one below
+(\href{https://bryon.io/from-facts-to-knowledge-the-layer-cake-of-rdfs-and-owl-e84819d8075d}{Bryon Jacob, 2025}):
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Semantic Web layer cake (bottom to top)}
+  \label{tab:layer-cake}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l X@{}}
+    \toprule
+    \textbf{Layer} & \textbf{What it adds} \\
+    \midrule
+    Raw data & SQL, CSV, JSON, spreadsheets---messy enterprise silos \\
+    RDF & A common graph of triples: ``Alice works at TechCorp'' \\
+    RDFS & Types and relationships: ``If X worksFor Y, X is a Person and Y is an Organization'' \\
+    OWL & Logic: transitivity, equivalence, disjointness, cardinality constraints \\
+    Reasoners & Deterministic inference and consistency checking \\
+    LLM interface & Natural language in; explanations out \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Each step adds power. Raw data says \texttt{SELECT * FROM emp\_tbl WHERE dept\_id = 42};
+RDF says ``Alice works at TechCorp''; RDFS adds typing rules; OWL concludes
+``If you work at a company in a city, you work in that city.''
+
+\subsection{RDF Schema (RDFS)}
+
+RDFS provides a basic vocabulary for describing \textbf{classes} (types of things)
+and \textbf{properties} (how things relate).
+
+\paragraph{Classes and properties}
+
+\begin{verbatim}
+# Define what things ARE
+:Person a rdfs:Class ;
+    rdfs:label "Person" ;
+    rdfs:comment "A human being" .
+
+:Organization a rdfs:Class ;
+    rdfs:label "Organization" .
+
+# Define how things RELATE
+:worksFor a rdf:Property ;
+    rdfs:domain :Person ;
+    rdfs:range :Organization ;
+    rdfs:label "works for" .
+\end{verbatim}
+
+\paragraph{Domain and range (type inference)}
+
+Given a single fact:
+
+\begin{verbatim}
+tc:employee-alice-johnson :worksFor tc:org-techcorp .
+\end{verbatim}
+
+RDFS inference yields:
+
+\begin{verbatim}
+tc:employee-alice-johnson a :Person .
+tc:org-techcorp a :Organization .
+\end{verbatim}
+
+The LLM does not need to guess Alice's type from naming conventions---the schema
+states it.
+
+\paragraph{Class hierarchies}
+
+\begin{verbatim}
+:Employee rdfs:subClassOf :Person .
+:Manager rdfs:subClassOf :Employee .
+:SeniorEngineer rdfs:subClassOf :Employee .
+
+tc:employee-alice-johnson a :SeniorEngineer .
+# Inferred: also :Employee and :Person
+\end{verbatim}
+
+Hierarchies let systems answer ``What kind of thing is Alice?'' at the right level
+of specificity.
+
+\subsection{OWL: logic on top of data}
+
+If RDFS is arithmetic, OWL is calculus
+(\href{https://bryon.io/from-facts-to-knowledge-the-layer-cake-of-rdfs-and-owl-e84819d8075d}{Bryon Jacob, 2025}).
+OWL adds logical constructs for sophisticated, decidable reasoning (based on Description Logic).
+
+\paragraph{Equivalence and disjointness}
+
+\begin{verbatim}
+:Company owl:equivalentClass :Corporation .
+
+:Person owl:disjointWith :Organization .
+# Something cannot be both a Person and an Organization
+\end{verbatim}
+
+\paragraph{Transitive properties}
+
+\begin{verbatim}
+:locatedIn a owl:TransitiveProperty .
+
+techcorp:hq :locatedIn city:seattle .
+city:seattle :locatedIn state:washington .
+state:washington :locatedIn country:usa .
+
+# Inferred:
+# techcorp:hq :locatedIn state:washington .
+# techcorp:hq :locatedIn country:usa .
+\end{verbatim}
+
+Without OWL, traversing location hierarchies requires custom query logic. With OWL,
+a reasoner computes the closure deterministically.
+
+\paragraph{Inverse properties}
+
+\begin{verbatim}
+:employs owl:inverseOf :worksFor .
+
+:alice :worksFor :techcorp .
+# Inferred: :techcorp :employs :alice .
+\end{verbatim}
+
+\paragraph{Property chains}
+
+\begin{verbatim}
+:workedOnBy owl:propertyChainAxiom ( :managedBy :worksFor ) .
+
+tc:project-kg :managedBy tc:employee-alice-johnson .
+tc:employee-alice-johnson :worksFor tc:org-techcorp .
+# Inferred: tc:project-kg :workedOnBy tc:org-techcorp .
+\end{verbatim}
+
+\paragraph{Consistency and cardinality}
+
+OWL reasoners catch logical errors before they reach downstream systems:
+
+\begin{verbatim}
+:something a :Person, :Organization .   # inconsistent (disjoint)
+
+:Project rdfs:subClassOf [
+    a owl:Restriction ;
+    owl:onProperty :hasManager ;
+    owl:cardinality 1
+] .
+:project123 :hasManager :alice, :bob .  # too many managers
+\end{verbatim}
+
+\subsection{Why LLMs benefit from RDFS and OWL}
+
+LLMs read OWL axioms almost as easily as English---\texttt{:locatedIn a
+owl:TransitiveProperty} is unambiguous. The breakthrough is pairing LLMs with
+\textbf{deterministic reasoners} that either prove a conclusion or do not
+(\href{https://bryon.io/from-facts-to-knowledge-the-layer-cake-of-rdfs-and-owl-e84819d8075d}{Bryon Jacob, 2025}):
+
+\begin{itemize}
+  \item \textbf{Automatic type understanding:} reasoners compute that Alice is a
+        \texttt{Person}, \texttt{Employee}, and \texttt{SeniorEngineer}; the LLM
+        queries proven facts, not guesses.
+  \item \textbf{Consistency guarantees:} contradictions are flagged before answers
+        are generated.
+  \item \textbf{Transitive reasoning:} ``Does Alice work in the USA?'' becomes a
+        graph traversal computed by a reasoner, not a multi-hop hallucination risk.
+  \item \textbf{Query expansion:} subclass relationships are materialized
+        automatically.
+\end{itemize}
+
+The LLM orchestrates: understand intent, translate to formal queries, call
+reasoning tools, explain results in natural language.
+
+\subsection{The 80/20 rule of semantic modeling}
+
+You do not need to model everything. A small RDFS/OWL core often delivers most of
+the value (\href{https://bryon.io/from-facts-to-knowledge-the-layer-cake-of-rdfs-and-owl-e84819d8075d}{Bryon Jacob, 2025}):
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{High-value RDFS and OWL constructs}
+  \label{tab:rdfs-owl-constructs}
+  \renewcommand{\arraystretch}{1.15}
+  \begin{tabularx}{\textwidth}{@{}l X@{}}
+    \toprule
+    \textbf{RDFS (start here)} & \textbf{OWL (add selectively)} \\
+    \midrule
+    \texttt{rdfs:subClassOf} & \texttt{owl:TransitiveProperty} \\
+    \texttt{rdfs:domain} & \texttt{owl:inverseOf} \\
+    \texttt{rdfs:range} & \texttt{owl:disjointWith} \\
+    \texttt{rdfs:subPropertyOf} & \texttt{owl:equivalentClass} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+As James Hendler noted: ``A little semantics goes a long way''
+(\href{https://bryon.io/from-facts-to-knowledge-the-layer-cake-of-rdfs-and-owl-e84819d8075d}{Bryon Jacob, 2025}).
+
+\subsection{Practical patterns for LLM integration}
+
+\paragraph{Semantic validation}
+
+Define valid business objects with OWL, then let a reasoner validate incoming
+data. The LLM translates constraint violations into plain language (e.g.\ ``This
+order is invalid because it has no items'').
+
+\paragraph{Inference-powered question answering}
+
+Combine natural-language understanding with deterministic inference---for
+example, defining \texttt{hasAncestor} as transitive over \texttt{hasParent}, so
+``Who are Alice's ancestors?'' is answered by a reasoner, not by the LLM inventing
+family trees.

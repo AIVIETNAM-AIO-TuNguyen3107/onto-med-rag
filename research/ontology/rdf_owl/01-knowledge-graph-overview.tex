@@ -1,0 +1,132 @@
+\section{Quick overview about Knowledge Graph}
+
+``Knowledge graphs triple LLM accuracy on enterprise data. But here's what nobody tells you upfront: every knowledge graph converges on the same patterns, the same solutions.''
+(\href{https://bryon.io/why-rdf-is-the-natural-knowledge-layer-for-ai-systems-a5fd0b43d4c5}{the series “LLMs Need Knowledge Graphs. Use RDF or End Up Rebuilding It.”}).
+
+It means that when organizations build knowledge graphs, they often end up discovering that they need the same fundamental structures, regardless of their original technology choice.
+
+For example, a company may start with:
+\begin{itemize}
+  \item a graph database like Neo4j
+  \item a property graph model
+  \item a custom JSON graph
+  \item a relational database with relationships
+  \item an ontology system
+\end{itemize}
+
+\textbf{But over time, they keep needing the same capabilities} (Table~\ref{tab:kg-patterns}).
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{3.8cm}X@{}}
+  \caption{Patterns every knowledge graph converges on}
+  \label{tab:kg-patterns}                            \\
+
+  \toprule
+  \textbf{Pattern} & \textbf{Description \& Example} \\
+  \midrule
+  \endfirsthead
+
+  \toprule
+  \textbf{Pattern} & \textbf{Description \& Example} \\
+  \midrule
+  \endhead
+
+  \bottomrule
+  \endfoot
+
+
+  \textbf{Pattern 1:}                                \\
+  Everything becomes an entity
+                   &
+  Companies realize they need to represent identifiable objects such as:
+
+  \medskip
+
+  \begin{tabular}[t]{@{}l@{}}
+    \texttt{Customer} \\
+    \texttt{Employee} \\
+    \texttt{Product}  \\
+    \texttt{Contract} \\
+    \texttt{Supplier} \\
+    \texttt{Location} \\
+    \texttt{Document}
+  \end{tabular}
+  \\
+
+  \addlinespace
+
+
+  \textbf{Pattern 2:}                                \\
+  Everything becomes a relationship
+                   &
+  They need to express connections between entities:
+
+  \medskip
+
+  \begin{tabular}[t]{@{}l@{}}
+    \texttt{Customer} $\rightarrow$ \texttt{purchased} $\rightarrow$ \texttt{Product}     \\
+    \texttt{Employee} $\rightarrow$ \texttt{works\_for} $\rightarrow$ \texttt{Department} \\
+    \texttt{Contract} $\rightarrow$ \texttt{applies\_to} $\rightarrow$ \texttt{Product}   \\
+    \texttt{Disease} $\rightarrow$ \texttt{treated\_by} $\rightarrow$ \texttt{Drug}
+  \end{tabular}
+  \\
+
+  \addlinespace
+
+
+  \textbf{Pattern 3:}                                \\
+  Shared meaning (semantics)
+                   &
+  Different systems often use different names for the same concept:
+
+  \medskip
+
+  \begin{tabular}[t]{@{}l@{}}
+    CRM: \texttt{"Client"}   \\
+    ERP: \texttt{"Customer"} \\
+    Support system: \texttt{"Account"}
+  \end{tabular}
+
+  \medskip
+
+  A knowledge graph reconciles these concepts as:
+
+  \medskip
+
+  \begin{center}
+    \texttt{Client = Customer = Account}
+  \end{center}
+
+  This is where \emph{ontologies} come into play.
+  \\
+
+  \addlinespace
+
+
+  \textbf{Pattern 4:}                                \\
+  Reasoning
+                   &
+  Organizations eventually ask questions such as:
+
+  \medskip
+
+  \emph{``Which suppliers are affected by this regulation?''}
+
+  \medskip
+
+  Although the supplier may not be directly linked to the regulation, the graph can infer the relationship through intermediate entities:
+
+  \medskip
+
+  \begin{tabular}[t]{@{}l@{}}
+    \texttt{Supplier}                  \\
+    $\downarrow$ \texttt{supplies}     \\
+    \texttt{Product}                   \\
+    $\downarrow$ \texttt{contains}     \\
+    \texttt{Component}                 \\
+    $\downarrow$ \texttt{affected\_by} \\
+    \texttt{Regulation}
+  \end{tabular}
+  \\
+
+
+  \bottomrule
+\end{tabularx}

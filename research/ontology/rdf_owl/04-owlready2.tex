@@ -1,0 +1,125 @@
+\section{Owlready2}
+
+\subsection{What is Owlready2?}
+
+Owlready2 is a Python package for \textbf{ontology-oriented programming}: load,
+create, modify, and reason over OWL~2 ontologies as ordinary Python objects
+(\href{https://owlready2.readthedocs.io/en/latest/intro.html}{Owlready2 documentation}).
+It fits our stack (\texttt{Python 3.11+}, \texttt{uv}) better than a separate
+Java GUI editor.
+
+Core capabilities:
+\begin{itemize}
+  \item Import/export OWL in RDF/XML, OWL/XML, N-Triples
+  \item Define classes, properties, and individuals in Python
+  \item Run \textbf{HermiT} or \textbf{Pellet} via \texttt{sync\_reasoner()}
+  \item SPARQL queries over an embedded RDF quadstore (SQLite)
+  \item Optional \textbf{PyMedTermino2} submodule for medical terminologies (UMLS)
+\end{itemize}
+
+\subsection{Python constructs and OWL}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Owlready2 API and OWL equivalents}
+  \label{tab:owlready2-owl}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabularx}{\textwidth}{@{}l X@{}}
+    \toprule
+    \textbf{Python (Owlready2)} & \textbf{OWL concept} \\
+    \midrule
+    \texttt{class Diagnosis(Thing): ...} & \texttt{owl:Class} \\
+    \texttt{class worksFor(ObjectProperty): ...} & \texttt{owl:ObjectProperty} \\
+    \texttt{domain = [Person]} / \texttt{range = [Organization]} &
+    \texttt{rdfs:domain}, \texttt{rdfs:range} \\
+    \texttt{Diagnosis("mention\_1")} & Named individual (ABox) \\
+    \texttt{mention.worksFor = [org]} & Object property assertion \\
+    \texttt{mention.label = ["trào ngược..."]} & \texttt{rdfs:label} \\
+    \texttt{sync\_reasoner()} & HermiT classification + inferred types \\
+    \texttt{onto.save()} & Export RDF/XML or Turtle \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Minimal example}
+
+\begin{verbatim}
+from owlready2 import *
+
+onto = get_ontology("http://onto-med-rag.example/clinical.owl")
+
+with onto:
+    class Diagnosis(Thing): pass
+    class Drug(Thing): pass
+    class mapsToICD(ObjectProperty):
+        domain = [Diagnosis]
+        range  = [Thing]
+
+    class Mention(Diagnosis):
+        pass
+
+mention = Mention("trào_ngược")
+mention.label = ["bệnh trào ngược dạ dày - thực quản"]
+
+with onto:
+    sync_reasoner()   # requires Java (JVM) for HermiT
+
+onto.save("data/kb/clinical_overlay.owl")
+\end{verbatim}
+
+After \texttt{sync\_reasoner()}, Owlready2 updates instance and class hierarchies
+from inferred facts---the same deterministic reasoning described in
+Table~\ref{tab:layer-cake}, but callable from pipeline code
+(\href{https://owlready2.readthedocs.io/en/latest/reasoning.html}{Reasoning docs}).
+
+\subsection{Reasoning workflow}
+
+\begin{enumerate}
+  \item Define classes, properties, restrictions, and disjointness in Python.
+  \item Create individuals and assert facts (or load an existing OWL file with
+        \texttt{onto.load()}).
+  \item Call \texttt{sync\_reasoner()} (HermiT, default) or
+        \texttt{sync\_reasoner\_pellet()}.
+  \item Inspect reclassified instances (\texttt{instance.\_\_class\_\_}) and inferred
+        superclasses; fix inconsistent classes before production use.
+  \item Save or query via SPARQL for \texttt{src/linking/} and
+        \texttt{src/ranking/}.
+\end{enumerate}
+
+HermiT and Pellet run on the JVM---install Java before reasoning
+(\href{https://owlready2.readthedocs.io/en/latest/reasoning.html}{Owlready2 reasoning}).
+
+\subsection{Loading external ontologies}
+
+ICD-10 and RxNorm can be loaded when available as OWL/RDF:
+
+\begin{verbatim}
+from owlready2 import *
+
+onto = get_ontology("data/kb/clinical_overlay.owl").load()
+# or merge imports from a standard terminology file
+icd = get_ontology("data/kb/icd10.owl").load()
+\end{verbatim}
+
+Owlready2 keeps a quadstore in memory or on disk; lists on ontology objects are
+modified in place and the store updates automatically
+(\href{https://owlready2.readthedocs.io/en/latest/intro.html}{Introduction}).
+
+\subsection{Why Owlready2 for \texttt{onto-med-rag}}
+
+\begin{itemize}
+  \item Same language as the NLP pipeline---no context switch to Java/GUI.
+  \item Scriptable: build KB overlays, run reasoner checks in CI, export Turtle
+        from \texttt{uv run} scripts.
+  \item Can attach Python methods to OWL classes (e.g.\ validation helpers for
+        assertion flags).
+  \item PyMedTermino2 integration for UMLS/medical codes when we extend beyond
+        competition ICD/RxNorm files
+        (\href{https://pypi.org/project/owlready2/}{PyPI}).
+\end{itemize}
+
+\subsection{Next step for our project}
+
+See Section~5 for how Owlready2 connects to the competition pipeline, JSON output
+schema, and phased roadmap.
