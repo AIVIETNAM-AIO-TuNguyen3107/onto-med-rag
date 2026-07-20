@@ -1,5 +1,9 @@
 # Large or competition-provided data — do not commit
-kb/
+kb/*
+!kb/icd10/
+!kb/rxnorm/
+!kb/icd10/concepts.sample.tsv
+!kb/rxnorm/concepts.sample.tsv
 test/input/*.txt
 raw/
 processed/

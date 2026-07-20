@@ -1,1 +1,16 @@
 .venv/
+.cursor/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+
+
+# PDF
+*.pdf
+*.synctex.gz

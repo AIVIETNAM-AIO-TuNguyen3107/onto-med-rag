@@ -38,14 +38,17 @@ Clinical Text (.txt)
 
 | Module | Responsibility |
 |--------|----------------|
-| `ner/` | Span detection, character offsets |
-| `classification/` | Assign one of 5 entity types |
-| `assertion/` | Context flags per entity |
-| `linking/icd10/` | Diagnosis → ICD-10 candidates |
-| `linking/rxnorm/` | Drug → RxNorm candidates |
-| `ranking/` | Rank and trim candidate lists |
-| `pipeline/` | Orchestrate end-to-end inference |
-| `schemas/` | Output JSON validation |
+| `pipeline/protocols.py` | `Extractor`, `Linker` Protocols (swap points) |
+| `pipeline/pipeline.py` | `ClinicalNLPipeline` — composes stages |
+| `extract/rules.py` | `RuleExtractor` (Week 2 baseline) |
+| `linking/fuzzy.py` | `FuzzyLinker` (ICD-10 / RxNorm retrieval) |
+| `pipeline/pipeline.py` | `ClinicalNLPipeline`, `write_predictions` |
+| `notebooks/example_run.ipynb` | Example runs (single + batch + ZIP) |
+| `schemas/` | Output JSON validation (functions) |
+| `eval/` | Local metrics (functions) |
+| `kb/` | KB loading (functions) |
+
+Week 3: add `extract/model.py` with `ViHealthExtractor`; inject via `ClinicalNLPipeline(extractor, linker)`.
 
 ## Knowledge bases (`data/kb/`)
 

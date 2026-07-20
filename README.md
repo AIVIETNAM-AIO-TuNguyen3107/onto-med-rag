@@ -53,9 +53,9 @@ With assertion detection (negation, family history, medical history).
 │   │   ├── icd10/         # Diagnosis → ICD-10
 │   │   └── rxnorm/        # Drug → RxNorm
 │   ├── ranking/           # Candidate ranking
-│   ├── pipeline/          # End-to-end orchestration
+│   ├── pipeline/          # Orchestration (ClinicalNLPipeline)
 │   └── schemas/           # Output JSON types
-├── notebooks/             # Exploratory analysis
+├── notebooks/             # example_run.ipynb — dev & submission runs
 └── experiments/           # Run configs and logs
 ```
 
@@ -86,11 +86,35 @@ data/test/input/
 
 Drive folder: [competition test input](https://drive.google.com/drive/folders/1GEARAJjBU3726Et4kZnPjvKGN1O7ghO3?usp=drive_link)
 
-### 2. Remaining steps
+### 2. Run PoC pipeline
 
-1. Download ICD-10 + RxNorm → `data/kb/`
-2. Implement pipeline in `src/`
-3. Write predictions → `data/test/output/{id}.json`
-4. Package submission ZIP
+Open [`notebooks/example_run.ipynb`](notebooks/example_run.ipynb) and run all cells.
+
+Or from a Python session:
+
+```python
+from pathlib import Path
+from src.pipeline.pipeline import build_default_pipeline, write_predictions
+
+ROOT = Path(".")
+pipeline = build_default_pipeline(ROOT / "data" / "kb")
+text = (ROOT / "data/examples/sample_input.txt").read_text(encoding="utf-8")
+entities = pipeline.process(text)
+
+# batch (after gdown)
+write_predictions(pipeline, ROOT / "data/test/input", ROOT / "data/test/output")
+```
+
+Run tests:
+
+```bash
+uv run pytest -v
+```
+
+### 3. Remaining steps
+
+1. Download ICD-10 + RxNorm → `data/kb/` (replace sample TSVs)
+2. Iterate on `src/extract/rules.py` or swap for fine-tuned model (Week 3)
+3. Package submission ZIP
 
 See `data/examples/sample_output.json` for the expected JSON format.
