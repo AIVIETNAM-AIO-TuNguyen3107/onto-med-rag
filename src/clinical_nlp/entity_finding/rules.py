@@ -176,8 +176,6 @@ class RuleEntityFinder:
             tokens = key.split()
             if not tokens or key in symptom_keys:
                 continue
-            if code.startswith("Z"):
-                continue
             if len(tokens) == 1 and len(key) < 8:
                 continue
             node = root

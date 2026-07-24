@@ -72,3 +72,18 @@ def test_output_directory_validation_checks_original_text(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="substring mismatch"):
         validate_output_directory(output_dir, input_dir)
+
+
+def test_output_directory_can_validate_selected_subset(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "1.txt").write_text("ho", encoding="utf-8")
+    (input_dir / "2.txt").write_text("sốt", encoding="utf-8")
+    (output_dir / "1.json").write_text(
+        '[{"text":"ho","type":"TRIỆU_CHỨNG","assertions":[],"position":[0,2]}]',
+        encoding="utf-8",
+    )
+
+    validate_output_directory(output_dir, input_dir, expected_stems={"1"})

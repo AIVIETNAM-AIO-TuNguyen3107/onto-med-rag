@@ -71,6 +71,7 @@ class LinkCandidate(BaseModel):
     score: float = 0.0
     retrieval_sources: list[str] = Field(default_factory=list)
     component_scores: dict[str, float] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Entity(BaseModel):
@@ -123,4 +124,3 @@ class StageResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
     elapsed_seconds: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
-

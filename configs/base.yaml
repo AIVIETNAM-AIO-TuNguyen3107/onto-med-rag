@@ -3,8 +3,20 @@ paths:
   runs_dir: runs
   artifacts_dir: artifacts
   icd_source: "DM ICD10-19_8_BYT.xlsx"
+  icd_catalog: artifacts/icd10_tt06_vi.jsonl
+  icd_catalog_csv: artifacts/icd10_tt06_vi.csv
+  icd_catalog_manifest: artifacts/icd10_tt06_vi.manifest.json
   icd_index: artifacts/icd_index.json
   rxnorm_cache: artifacts/rxnorm_cache.json
+
+icd_crawl:
+  api_base_url: https://ccs.whiteneuron.com/api/ICD10_TT06
+  source_page_url: https://icd.kcb.vn/icd-10-tt06/icd10-tt06
+  language: vi
+  request_delay_seconds: 0.5
+  connect_timeout_seconds: 10
+  read_timeout_seconds: 30
+  max_retries: 5
 
 entity_finding:
   chunk_chars: 1800
@@ -32,4 +44,3 @@ linking:
 run:
   fail_on_model_unavailable: false
   pretty_json: true
-

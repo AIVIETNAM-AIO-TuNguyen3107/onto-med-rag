@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,11 +43,38 @@ class RunSupervisor:
         self.run_dir = config.paths.runs_dir / self.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-    def preflight(self) -> dict[str, Any]:
-        files = sorted(
-            self.config.paths.input_dir.glob("*.txt"),
-            key=lambda path: int(path.stem) if path.stem.isdigit() else path.stem,
+    def _selected_files(self, document_ids: list[str] | None = None) -> list[Path]:
+        if document_ids is None:
+            files = list(self.config.paths.input_dir.glob("*.txt"))
+        else:
+            if not document_ids:
+                raise ValueError("at least one document ID is required")
+            if len(document_ids) != len(set(document_ids)):
+                raise ValueError("document IDs must be unique")
+            if any(
+                not value or Path(value).name != value or Path(value).suffix
+                for value in document_ids
+            ):
+                raise ValueError("document IDs must be plain filename stems")
+            files = [
+                self.config.paths.input_dir / f"{value}.txt"
+                for value in document_ids
+            ]
+            missing = [str(path) for path in files if not path.exists()]
+            if missing:
+                raise FileNotFoundError(f"selected input files do not exist: {missing}")
+        return sorted(
+            files,
+            key=lambda path: (
+                (0, int(path.stem))
+                if path.stem.isdigit()
+                else (1, path.stem)
+            ),
         )
+
+    def preflight(self, document_ids: list[str] | None = None) -> dict[str, Any]:
+        icd_source = self.config.paths.preferred_icd_source()
+        files = self._selected_files(document_ids)
         if not files:
             raise ValueError("no input text files found")
         manifest = {
@@ -61,18 +89,32 @@ class RunSupervisor:
                 }
                 for path in files
             ],
+            "selection": {
+                "document_ids": [path.stem for path in files],
+                "document_count": len(files),
+            },
             "models": {
                 "ner": self.config.ner.model_dump(mode="json"),
                 "llm": self.config.llm.model_dump(mode="json"),
+                "runtime": self.pipeline.model_metadata(),
             },
             "terminology": {
-                "icd_source": str(self.config.paths.icd_source),
+                "icd_source": str(icd_source),
                 "icd_source_sha256": (
-                    _sha256(self.config.paths.icd_source)
-                    if self.config.paths.icd_source.exists()
+                    _sha256(icd_source) if icd_source.exists() else None
+                ),
+                "icd_index": str(self.config.paths.icd_index),
+                "icd_index_sha256": (
+                    _sha256(self.config.paths.icd_index)
+                    if self.config.paths.icd_index.exists()
                     else None
                 ),
                 "rxnorm_cache": str(self.config.paths.rxnorm_cache),
+                "rxnorm_cache_sha256_before": (
+                    _sha256(self.config.paths.rxnorm_cache)
+                    if self.config.paths.rxnorm_cache.exists()
+                    else None
+                ),
             },
         }
         _write_json(self.run_dir / "source_manifest.json", manifest)
@@ -81,6 +123,9 @@ class RunSupervisor:
             self.config.model_dump(mode="json"),
         )
         return manifest
+
+    def record_online_preflight(self, payload: dict[str, Any]) -> None:
+        _write_json(self.run_dir / "online_preflight.json", payload)
 
     def run_document(self, document_id: str) -> dict[str, Any]:
         source = self.config.paths.input_dir / f"{document_id}.txt"
@@ -115,15 +160,35 @@ class RunSupervisor:
                 "merged_entities": len(artifacts.merged_entities),
                 "reranked_entities": len(artifacts.reranked_entities),
             },
+            "type_counts": dict(Counter(entity.type.value for entity in entities)),
+            "assertion_counts": dict(
+                Counter(
+                    assertion.value
+                    for entity in entities
+                    for assertion in entity.assertions
+                )
+            ),
+            "linked_entities": sum(bool(entity.candidates) for entity in entities),
+            "empty_candidate_entities": sum(
+                entity.type.value in {"BỆNH_LÝ", "THUỐC"} and not entity.candidates
+                for entity in entities
+            ),
         }
         _write_json(doc_dir / "validation.json", validation)
         return validation
 
-    def run_all(self) -> list[dict[str, Any]]:
-        files = sorted(
-            self.config.paths.input_dir.glob("*.txt"),
-            key=lambda path: int(path.stem) if path.stem.isdigit() else path.stem,
-        )
+    def run_all(
+        self,
+        document_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        files = self._selected_files(document_ids)
+        output_dir = self.run_dir / "outputs"
+        existing_outputs = sorted(path.name for path in output_dir.glob("*.json"))
+        if existing_outputs:
+            raise FileExistsError(
+                "run output directory is not empty; use a new run ID: "
+                f"{existing_outputs}"
+            )
         results: list[dict[str, Any]] = []
         for index, path in enumerate(files, start=1):
             result = self.run_document(path.stem)
@@ -151,6 +216,38 @@ class RunSupervisor:
                 "warnings": sum(row["warning_count"] for row in results),
             },
         )
+        type_counts: Counter[str] = Counter()
+        assertion_counts: Counter[str] = Counter()
+        for row in results:
+            type_counts.update(row["type_counts"])
+            assertion_counts.update(row["assertion_counts"])
+        _write_json(
+            self.run_dir / "quality_summary.json",
+            {
+                "documents": len(results),
+                "entities": sum(row["entity_count"] for row in results),
+                "types": dict(type_counts),
+                "assertions": dict(assertion_counts),
+                "linked_entities": sum(row["linked_entities"] for row in results),
+                "empty_candidate_entities": sum(
+                    row["empty_candidate_entities"] for row in results
+                ),
+                "per_document": [
+                    {
+                        "document_id": row["document_id"],
+                        "entities": row["entity_count"],
+                        "types": row["type_counts"],
+                        "assertions": row["assertion_counts"],
+                        "linked_entities": row["linked_entities"],
+                        "empty_candidate_entities": row[
+                            "empty_candidate_entities"
+                        ],
+                        "warnings": row["warning_count"],
+                    }
+                    for row in results
+                ],
+            },
+        )
         for index, stage in enumerate(
             (
                 "rule_proposals",
@@ -176,6 +273,32 @@ class RunSupervisor:
                     ],
                 },
             )
+        _write_json(
+            self.run_dir / "run_manifest_final.json",
+            {
+                "run_id": self.run_id,
+                "completed_at": datetime.now(UTC).isoformat(),
+                "document_ids": [path.stem for path in files],
+                "models": self.pipeline.model_metadata(),
+                "terminology": {
+                    "icd_index_sha256": (
+                        _sha256(self.config.paths.icd_index)
+                        if self.config.paths.icd_index.exists()
+                        else None
+                    ),
+                    "rxnorm_cache_sha256_after": (
+                        _sha256(self.config.paths.rxnorm_cache)
+                        if self.config.paths.rxnorm_cache.exists()
+                        else None
+                    ),
+                },
+                "validation": {
+                    "documents": len(results),
+                    "entities": sum(row["entity_count"] for row in results),
+                    "warnings": sum(row["warning_count"] for row in results),
+                },
+            },
+        )
         return results
 
     @staticmethod
@@ -186,10 +309,12 @@ class RunSupervisor:
             "ner_proposals.json": artifacts.ner_proposals,
             "llm_proposals.json": artifacts.llm_proposals,
             "merged_entities.json": artifacts.merged_entities,
+            "llm_reviews.json": artifacts.llm_reviews,
             "assertions.json": artifacts.assertions,
             "icd_candidates.json": artifacts.icd_candidates,
             "rxnorm_candidates.json": artifacts.rxnorm_candidates,
             "reranked_entities.json": artifacts.reranked_entities,
+            "model_metadata.json": artifacts.model_metadata,
             "warnings.json": artifacts.warnings,
         }
         for name, payload in mapping.items():

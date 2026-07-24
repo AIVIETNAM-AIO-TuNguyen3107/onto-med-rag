@@ -7,16 +7,7 @@ paths:
   icd_catalog_csv: artifacts/icd10_tt06_vi.csv
   icd_catalog_manifest: artifacts/icd10_tt06_vi.manifest.json
   icd_index: artifacts/icd_index.json
-  rxnorm_cache: artifacts/rxnorm_cache.json
-
-icd_crawl:
-  api_base_url: https://ccs.whiteneuron.com/api/ICD10_TT06
-  source_page_url: https://icd.kcb.vn/icd-10-tt06/icd10-tt06
-  language: vi
-  request_delay_seconds: 0.5
-  connect_timeout_seconds: 10
-  read_timeout_seconds: 30
-  max_retries: 5
+  rxnorm_cache: artifacts/rxnorm_online_first5_cache.json
 
 entity_finding:
   chunk_chars: 1400
@@ -29,18 +20,23 @@ ner:
   local_files_only: true
 
 llm:
-  backend: noop
-  model_id: Qwen/Qwen3.5-9B
+  backend: openai_compatible
+  model_id: Qwen/Qwen3.5-9B:fastest
+  endpoint: https://router.huggingface.co/v1
+  api_key_env: HF_TOKEN
   reasoning_effort: high
   thinking: true
   max_new_tokens: 4096
   max_retries: 2
+  request_timeout_seconds: 600
 
 linking:
   icd_max_candidates: 3
   rxnorm_max_candidates: 3
-  use_rxnav_api: false
+  retrieval_candidates: 20
+  use_rxnav_api: true
 
 run:
-  fail_on_model_unavailable: false
+  fail_on_model_unavailable: true
   pretty_json: true
+  llm_full_review: true

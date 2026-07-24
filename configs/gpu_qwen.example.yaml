@@ -5,8 +5,20 @@ paths:
   runs_dir: /data/viettel_stage1/runs
   artifacts_dir: /data/viettel_stage1/artifacts
   icd_source: /data/viettel_stage1/terminology/DM ICD10-19_8_BYT.xlsx
+  icd_catalog: /data/viettel_stage1/artifacts/icd10_tt06_vi.jsonl
+  icd_catalog_csv: /data/viettel_stage1/artifacts/icd10_tt06_vi.csv
+  icd_catalog_manifest: /data/viettel_stage1/artifacts/icd10_tt06_vi.manifest.json
   icd_index: /data/viettel_stage1/artifacts/icd_index.json
   rxnorm_cache: /data/viettel_stage1/terminology/rxnorm_cache.json
+
+icd_crawl:
+  api_base_url: https://ccs.whiteneuron.com/api/ICD10_TT06
+  source_page_url: https://icd.kcb.vn/icd-10-tt06/icd10-tt06
+  language: vi
+  request_delay_seconds: 0.5
+  connect_timeout_seconds: 10
+  read_timeout_seconds: 30
+  max_retries: 5
 
 entity_finding:
   chunk_chars: 1400

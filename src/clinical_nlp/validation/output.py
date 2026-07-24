@@ -46,8 +46,18 @@ def write_entities(
 def validate_output_directory(
     output_dir: Path,
     input_dir: Path,
+    expected_stems: set[str] | None = None,
 ) -> None:
-    input_stems = {path.stem for path in input_dir.glob("*.txt")}
+    input_stems = (
+        expected_stems
+        if expected_stems is not None
+        else {path.stem for path in input_dir.glob("*.txt")}
+    )
+    missing_inputs = [
+        stem for stem in input_stems if not (input_dir / f"{stem}.txt").exists()
+    ]
+    if missing_inputs:
+        raise ValueError(f"selected input files do not exist: {sorted(missing_inputs)}")
     output_files = list(output_dir.glob("*.json"))
     output_stems = {path.stem for path in output_files}
     if output_stems != input_stems:
