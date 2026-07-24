@@ -1,15 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "onto-med-rag"
+name = "clinical-nlp"
 version = "0.1.0"
-description = "Vietnamese clinical NLP — NER, assertion detection, ICD-10/RxNorm linking"
-readme = "README.md"
+description = "Modular Vietnamese clinical entity, assertion, and terminology linking pipeline"
 requires-python = ">=3.11"
 dependencies = [
-    "gdown>=5.0",
+  "openpyxl>=3.1",
+  "pydantic>=2.8",
+  "PyYAML>=6.0",
+  "requests>=2.31",
 ]
 
-[dependency-groups]
-dev = []
+[project.optional-dependencies]
+models = [
+  "gliner>=0.2.22",
+  "transformers>=4.57",
+  "accelerate>=1.0",
+]
+retrieval = [
+  "rapidfuzz>=3.9",
+  "rank-bm25>=0.2.2",
+]
+test = ["pytest>=8"]
 
-[tool.uv]
-package = false
+[project.scripts]
+clinical-nlp = "clinical_nlp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+

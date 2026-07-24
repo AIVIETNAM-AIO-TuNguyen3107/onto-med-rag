@@ -1,96 +1,59 @@
-# Medical Knowledge Retrieval
+# Vietnamese clinical NLP inference pipeline
 
-**Competition:** Bài 2 — Ontological Reasoning in Medical Knowledge Retrieval
+This repository extracts Vietnamese clinical entities, assertions, ICD-10
+candidates, and RxNorm candidates. It writes one JSON array per input text file
+using Python Unicode offsets and end-exclusive spans.
 
-Build a pipeline that extracts medical concepts from Vietnamese clinical free-text and maps:
-- Diagnoses → **ICD-10**
-- Drugs → **RxNorm**
+The intended GPU configuration uses:
 
-With assertion detection (negation, family history, medical history).
+- `Ihor/gliner-biomed-large-v1.0` for NER;
+- `Qwen/Qwen3.5-9B` with thinking enabled for recovery and reranking;
+- a local ICD-10 workbook/index;
+- a local RxNorm cache by default.
 
-## Phases
+Competition input, terminology workbooks, model weights, local configurations,
+and generated runs are deliberately excluded from Git.
 
-| Phase | Dates | Format |
-|-------|-------|--------|
-| Phase 1 (current) | 02/07 → 30/07/2026 | ZIP (GPU) |
-| Phase 2 | 17/08 → 19/08/2026 | API endpoint |
-| Phase 3 | 09/09 → 10/09/2026 | API endpoint |
+## GPU quick start
 
-## Sprint plan (Phase 1)
-
-| Week | Goal |
-|------|------|
-| 1 | Knowledge gap — research docs, KBs, shared understanding |
-| 2 | Baselines + PoC — literature review, select models, benchmark on test set |
-| 3 | Fix & submit — iterate on weak spots, deliver best ZIP by 30/07 |
-
-## Docs
-
-- [Problem definition](docs/problem_definition.md) — input/output spec, entity types
-- [Architecture](docs/architecture.md) — pipeline and module layout
-- [Timeline](docs/timeline.md) — competition dates + sprint plan
-- [Baseline decisions](docs/baseline_decisions.md) — model choices + Week 2 benchmark
-
-## Repository layout
-
-```
-├── pyproject.toml         # Project config + dependencies (uv)
-├── docs/                  # Problem spec, architecture, timeline, meetings
-├── research/              # Team research notes (ICD-10, RxNorm, NLP, ontology)
-├── data/
-│   ├── kb/                # ICD-10, RxNorm knowledge bases
-│   ├── raw/               # Self-created training data
-│   ├── processed/         # Annotated / tokenized splits
-│   ├── test/
-│   │   ├── input/         # 1.txt … 100.txt (from Google Drive)
-│   │   └── output/        # 1.json … 100.json (predictions)
-│   └── examples/          # Sample I/O for development
-├── src/
-│   ├── ner/               # Span detection
-│   ├── classification/    # Entity type (5 labels)
-│   ├── assertion/         # isNegated, isFamily, isHistorical
-│   ├── linking/
-│   │   ├── icd10/         # Diagnosis → ICD-10
-│   │   └── rxnorm/        # Drug → RxNorm
-│   ├── ranking/           # Candidate ranking
-│   ├── pipeline/          # End-to-end orchestration
-│   └── schemas/           # Output JSON types
-├── notebooks/             # Exploratory analysis
-└── experiments/           # Run configs and logs
-```
-
-## Quick start (Phase 1)
-
-### 0. Install dependencies (uv)
+Use Python 3.11 and install a CUDA-enabled PyTorch build appropriate for the GPU
+host before installing the project:
 
 ```bash
-uv sync
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip wheel
+python -m pip install -e ".[models,retrieval,test]"
 ```
 
-### 1. Download test input (gdown)
+Copy the GPU configuration and edit all paths:
 
 ```bash
-uv run gdown --folder "https://drive.google.com/drive/folders/1GEARAJjBU3726Et4kZnPjvKGN1O7ghO3" \
-  -O data/test --remaining-ok
+cp configs/gpu_qwen.example.yaml configs/gpu_qwen.local.yaml
 ```
 
-Expected layout after download:
+Place UTF-8 inputs directly in the configured `input_dir`, for example
+`1.txt`, `2.txt`, and so on. Do not normalize or edit the source text.
 
+Run the preflight, a one-document smoke test, then the full run:
+
+```bash
+pytest -q
+clinical-nlp --config configs/gpu_qwen.local.yaml build-icd
+clinical-nlp --config configs/gpu_qwen.local.yaml run-document \
+  --document 1 --run-id qwen35-smoke
+clinical-nlp --config configs/gpu_qwen.local.yaml infer \
+  --run-id qwen35-9b-full
+clinical-nlp --config configs/gpu_qwen.local.yaml validate \
+  --run-id qwen35-9b-full
 ```
-data/test/input/
-├── 1.txt
-├── 2.txt
-...
-└── 100.txt
+
+Final result files are under the configured:
+
+```text
+runs_dir/qwen35-9b-full/outputs/
 ```
 
-Drive folder: [competition test input](https://drive.google.com/drive/folders/1GEARAJjBU3726Et4kZnPjvKGN1O7ghO3?usp=drive_link)
-
-### 2. Remaining steps
-
-1. Download ICD-10 + RxNorm → `data/kb/`
-2. Implement pipeline in `src/`
-3. Write predictions → `data/test/output/{id}.json`
-4. Package submission ZIP
-
-See `data/examples/sample_output.json` for the expected JSON format.
+Before running private data, read
+[GPU_GITHUB_HANDOFF_PLAN.md](GPU_GITHUB_HANDOFF_PLAN.md) for hardware,
+privacy, model-verification, validation, and packaging requirements.

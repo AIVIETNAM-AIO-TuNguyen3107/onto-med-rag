@@ -1,0 +1,34 @@
+paths:
+  input_dir: input
+  runs_dir: runs
+  artifacts_dir: artifacts
+  icd_source: "DM ICD10-19_8_BYT.xlsx"
+  icd_index: artifacts/icd_index.json
+  rxnorm_cache: artifacts/rxnorm_cache.json
+
+entity_finding:
+  chunk_chars: 1400
+  chunk_overlap_chars: 160
+  ner_threshold: 0.35
+
+ner:
+  backend: gliner
+  model_id: Ihor/gliner-biomed-large-v1.0
+  local_files_only: true
+
+llm:
+  backend: noop
+  model_id: Qwen/Qwen3.5-9B
+  reasoning_effort: high
+  thinking: true
+  max_new_tokens: 4096
+  max_retries: 2
+
+linking:
+  icd_max_candidates: 3
+  rxnorm_max_candidates: 3
+  use_rxnav_api: false
+
+run:
+  fail_on_model_unavailable: false
+  pretty_json: true

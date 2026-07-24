@@ -1,0 +1,38 @@
+# Copy to configs/gpu_qwen.local.yaml and replace every /data/viettel_stage1
+# path with the absolute paths on the GPU host. The local file is gitignored.
+paths:
+  input_dir: /data/viettel_stage1/input
+  runs_dir: /data/viettel_stage1/runs
+  artifacts_dir: /data/viettel_stage1/artifacts
+  icd_source: /data/viettel_stage1/terminology/DM ICD10-19_8_BYT.xlsx
+  icd_index: /data/viettel_stage1/artifacts/icd_index.json
+  rxnorm_cache: /data/viettel_stage1/terminology/rxnorm_cache.json
+
+entity_finding:
+  chunk_chars: 1400
+  chunk_overlap_chars: 160
+  ner_threshold: 0.35
+
+ner:
+  backend: gliner
+  model_id: Ihor/gliner-biomed-large-v1.0
+  local_files_only: false
+
+llm:
+  backend: qwen_transformers
+  model_id: Qwen/Qwen3.5-9B
+  local_files_only: false
+  reasoning_effort: high
+  thinking: true
+  max_new_tokens: 4096
+  max_retries: 2
+
+linking:
+  icd_max_candidates: 3
+  rxnorm_max_candidates: 3
+  use_rxnav_api: false
+
+run:
+  # Never allow the GPU run to silently fall back to a no-model pipeline.
+  fail_on_model_unavailable: true
+  pretty_json: true
