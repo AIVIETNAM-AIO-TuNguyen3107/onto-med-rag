@@ -70,6 +70,36 @@ def test_entity_review_cannot_change_positions(tmp_path: Path) -> None:
         pipeline._review_entities(document, [proposal], {(0, 2): []})
 
 
+def test_entity_review_pads_missing_positions(tmp_path: Path) -> None:
+    # Truncated LLM review omits a span; default keep with original type.
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=True,
+                    type=EntityType.SYMPTOM,
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho xx")
+    kept = SpanProposal(
+        start=0, end=2, text="ho", type=EntityType.SYMPTOM, source="test"
+    )
+    missing = SpanProposal(
+        start=3, end=5, text="xx", type=EntityType.DIAGNOSIS, source="test"
+    )
+    reviewed, assertions, _ = pipeline._review_entities(
+        document,
+        [kept, missing],
+        {(0, 2): [], (3, 5): [Assertion.HISTORICAL.value]},
+    )
+    assert {(row.start, row.end) for row in reviewed} == {(0, 2), (3, 5)}
+    assert assertions[(3, 5)] == [Assertion.HISTORICAL.value]
+
+
 def test_entity_review_rejects_assertions_on_lab_results(tmp_path: Path) -> None:
     pipeline = _pipeline(
         tmp_path,

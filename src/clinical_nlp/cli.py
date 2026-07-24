@@ -186,7 +186,8 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "infer":
         supervisor = RunSupervisor(config, pipeline, run_id=args.run_id)
         supervisor.preflight(args.documents)
-        supervisor.record_online_preflight(pipeline.online_preflight())
+        online = pipeline.online_preflight()
+        supervisor.record_online_preflight(online)
         results = supervisor.run_all(args.documents)
         expected = (
             set(args.documents)

@@ -1,129 +1,106 @@
-# Vietnamese clinical NLP inference pipeline
+# Vietnamese clinical NLP pipeline
 
-This repository extracts Vietnamese clinical entities, assertions, ICD-10
-candidates, and RxNorm candidates. It writes one JSON array per input text file
-using Python Unicode offsets and end-exclusive spans.
+Extract Vietnamese clinical entities and assertions, then link diagnoses to
+ICD-10 (TT06) and medications to RxNorm. Each input `*.txt` becomes one JSON
+array of entities with Unicode offsets and end-exclusive spans.
 
-The intended GPU configuration uses:
+**Stack (default GPU path):** GLiNER biomed NER → Qwen3.5-9B for recovery /
+review / rerank → TT06 ICD catalog → RxNorm (cache and/or RxNav).
 
-- `Ihor/gliner-biomed-large-v1.0` for NER;
-- `Qwen/Qwen3.5-9B` with thinking enabled for recovery and reranking;
-- a crawled Vietnamese ICD-10 TT06 catalog or local workbook/index;
-- a local RxNorm cache by default.
+Private inputs, model weights, `configs/*.local.yaml`, and `runs/` stay out of
+Git.
 
-Competition input, terminology workbooks, model weights, local configurations,
-and generated runs are deliberately excluded from Git.
+## Install
 
-## Crawl the Vietnamese ICD-10 TT06 catalog
-
-The website is a JavaScript application, but its classification tree is exposed
-through a public JSON API. Crawl it sequentially into ignored local artifacts:
+Python 3.11+. Use a CUDA PyTorch build that matches the GPU host, then:
 
 ```bash
-clinical-nlp --config configs/base.yaml crawl-icd
+uv sync --extra models --extra retrieval --extra test
+# or: pip install -e ".[models,retrieval,test]"
 ```
 
-The command writes:
+`bitsandbytes` is included under `[models]` for optional 4-bit local Qwen loads.
 
-```text
-artifacts/icd10_tt06_vi.jsonl
-artifacts/icd10_tt06_vi.csv
-artifacts/icd10_tt06_vi.manifest.json
-artifacts/icd_index.json
-```
+## Configuration
 
-The JSONL catalog is canonical. Each row records the node model, source ID,
-code, Vietnamese name, parent, ancestry path, depth, zero-based sibling order,
-and leaf flag. Paths preserve reused nodes that appear under multiple parents;
-their children are fetched once and replayed under each path. The CSV contains
-the same fields. The manifest records source URLs, retrieval time, occurrence
-and unique-node counts, model counts, request count, and file hashes.
+Copy an example config to a **gitignored** local file and edit paths / models:
 
-If a crawl is interrupted, rerun it with `--resume`. A completed snapshot is
-never replaced implicitly; use `--force` to deliberately start a fresh crawl
-and atomically replace it:
-
-```bash
-clinical-nlp --config configs/base.yaml crawl-icd --resume
-clinical-nlp --config configs/base.yaml crawl-icd --force
-```
-
-The crawler uses one worker, waits 0.5 seconds between requests, retries
-temporary failures, and honors `Retry-After`. These settings and the API/source
-URLs are configurable under `icd_crawl`. When the catalog exists it is preferred
-for ICD index construction; otherwise the configured `paths.icd_source`
-workbook remains the fallback.
-
-## GPU quick start
-
-Use Python 3.11 and install a CUDA-enabled PyTorch build appropriate for the GPU
-host before installing the project:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip wheel
-python -m pip install -e ".[models,retrieval,test]"
-```
-
-Copy the GPU configuration and edit all paths:
+| Template | Use when |
+| --- | --- |
+| `configs/gpu_qwen.example.yaml` | Local Transformers Qwen on GPU |
+| `configs/online_first5.example.yaml` | Hosted Qwen via Hugging Face router |
+| `configs/base.yaml` | Crawl / light local tooling |
 
 ```bash
 cp configs/gpu_qwen.example.yaml configs/gpu_qwen.local.yaml
+# edit paths, model_id, quantization, thinking, RxNav, …
 ```
 
-Place UTF-8 inputs directly in the configured `input_dir`, for example
-`1.txt`, `2.txt`, and so on. Do not normalize or edit the source text.
+Put UTF-8 notes in `input_dir` as `1.txt`, `2.txt`, … Do not normalize source text.
 
-Run the preflight, a one-document smoke test, then the full run:
+### Local GPU notes (~16GB)
+
+- Set `llm.quantization: bnb_4bit` so the 9B model stays on GPU (full BF16 often CPU-offloads and crawls).
+- Prefer `thinking: false` for reliable JSON; long thinking burns `max_new_tokens` and triggers retries.
+- Assertion review over many entities needs a large `max_new_tokens` (e.g. 4096).
+- `infer` refuses a non-empty `runs/<run-id>/outputs/`; use a new `--run-id` or clear that folder.
+
+## ICD-10 TT06 catalog
+
+Crawl the public TT06 JSON API into ignored artifacts (or fall back to the
+configured workbook):
+
+```bash
+clinical-nlp --config configs/base.yaml crawl-icd
+clinical-nlp --config configs/base.yaml crawl-icd --resume   # interrupted crawl
+clinical-nlp --config configs/base.yaml crawl-icd --force    # replace snapshot
+```
+
+Writes `artifacts/icd10_tt06_vi.{jsonl,csv}`, a manifest, and rebuilds
+`artifacts/icd_index.json`. Tune `icd_crawl` in the config (delay, retries, URLs).
+
+Build / refresh the ICD index alone:
+
+```bash
+clinical-nlp --config configs/gpu_qwen.local.yaml build-icd
+```
+
+## Local Transformers run
 
 ```bash
 pytest -q
-clinical-nlp --config configs/gpu_qwen.local.yaml build-icd
+
 clinical-nlp --config configs/gpu_qwen.local.yaml run-document \
   --document 1 --run-id qwen35-smoke
+
 clinical-nlp --config configs/gpu_qwen.local.yaml infer \
-  --run-id qwen35-9b-full
+  --documents 1 2 3 4 5 \
+  --run-id local-qwen-rxnav-icd10-first5
+
 clinical-nlp --config configs/gpu_qwen.local.yaml validate \
-  --run-id qwen35-9b-full
+  --documents 1 2 3 4 5 \
+  --run-id local-qwen-rxnav-icd10-first5
 ```
 
-Final result files are under the configured:
+Submission arrays: `runs/<run-id>/outputs/*.json`. Per-document audits live under
+`runs/<run-id>/documents/<id>/` (proposals, candidates, warnings, non-secret
+model metadata). Thinking traces and credentials are never stored.
 
-```text
-runs_dir/qwen35-9b-full/outputs/
-```
+## Hosted Qwen first-five (HF router)
 
-Before running private data, read
-[GPU_GITHUB_HANDOFF_PLAN.md](GPU_GITHUB_HANDOFF_PLAN.md) for hardware,
-privacy, model-verification, validation, and packaging requirements.
-
-## Strict hosted-Qwen first-five run
-
-The first-five configuration keeps GLiNER local, calls
-`Qwen/Qwen3.5-9B:fastest` through the Hugging Face router, uses the canonical
-TT06 JSONL ICD catalog, and queries RxNav with a persistent local cache. Copy
-the tracked template so machine-specific settings stay uncommitted:
+GLiNER stays local; Qwen runs as `Qwen/Qwen3.5-9B:fastest` through the HF
+router. TT06 JSONL + RxNav with a persistent cache.
 
 ```bash
 cp configs/online_first5.example.yaml configs/online_first5.local.yaml
-export HF_TOKEN="a-newly-rotated-token"
+export HF_TOKEN="…"   # never put the token in YAML, logs, or commits
 ```
-
-Never put the token in YAML, shell history, logs, commits, or run artifacts.
-The strict preflight loads the cached GLiNER model, verifies a real Qwen JSON
-response and returned model identity, queries RxNav, and records terminology
-and input hashes:
 
 ```bash
 clinical-nlp --config configs/online_first5.local.yaml preflight \
   --documents 1 2 3 4 5 \
   --run-id online-qwen-rxnav-icd10-first5-preflight
-```
 
-Run exactly the selected documents:
-
-```bash
 clinical-nlp --config configs/online_first5.local.yaml infer \
   --documents 1 2 3 4 5 \
   --run-id online-qwen-rxnav-icd10-first5
@@ -133,9 +110,18 @@ clinical-nlp --config configs/online_first5.local.yaml validate \
   --run-id online-qwen-rxnav-icd10-first5
 ```
 
-The run refuses to reuse a non-empty output directory. Final submission files
-are the five JSON arrays under `runs/online-qwen-rxnav-icd10-first5/outputs/`.
-`quality_summary.json` reports type/assertion/link coverage and empty candidate
-lists; per-document audit directories preserve proposals, constrained Qwen
-decisions, retrieved and selected terminology candidates, warnings, and
-non-secret model metadata. Reasoning content and credentials are never stored.
+Preflight checks GLiNER, a live Qwen JSON response / model id, RxNav, and
+terminology / input hashes.
+
+## Entity types
+
+Only these types are kept in outputs:
+
+`TRIỆU_CHỨNG` · `TÊN_XÉT_NGHIỆM` · `KẾT_QUẢ_XÉT_NGHIỆM` · `CHẨN_ĐOÁN` · `THUỐC`
+
+LLM recovery rows with other labels (e.g. procedures) are dropped at parse time.
+
+## More detail
+
+Hardware, privacy, and packaging expectations:
+[GPU_GITHUB_HANDOFF_PLAN.md](GPU_GITHUB_HANDOFF_PLAN.md).

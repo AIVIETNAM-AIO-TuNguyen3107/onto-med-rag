@@ -51,6 +51,8 @@ class ModelConfig(BaseModel):
     endpoint: str | None = None
     api_key_env: str | None = None
     request_timeout_seconds: float = Field(default=600.0, gt=0)
+    # None | "bnb_4bit" — post-training load quantization for local Transformers.
+    quantization: str | None = None
 
 
 class LinkingConfig(BaseModel):

@@ -34,7 +34,10 @@ llm:
   backend: qwen_transformers
   model_id: Qwen/Qwen3.5-9B
   local_files_only: false
+  # Optional: bnb_4bit for ~16GB GPUs (avoids CPU offload of full BF16).
+  # quantization: bnb_4bit
   reasoning_effort: high
+  # On ~16GB local GPUs prefer thinking: false (thinking burns the token budget).
   thinking: true
   max_new_tokens: 4096
   max_retries: 2

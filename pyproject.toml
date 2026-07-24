@@ -12,6 +12,10 @@ dependencies = [
   "pydantic>=2.8",
   "PyYAML>=6.0",
   "requests>=2.31",
+  "torch",
+  "huggingface-hub",
+  "torchvision",
+  "pillow",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +23,7 @@ models = [
   "gliner>=0.2.22",
   "transformers>=4.57",
   "accelerate>=1.0",
+  "bitsandbytes>=0.45",
 ]
 retrieval = [
   "rapidfuzz>=3.9",

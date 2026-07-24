@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from clinical_nlp.assertion_detection import AssertionDetector
 from clinical_nlp.config import PipelineConfig
@@ -24,6 +24,25 @@ from clinical_nlp.schemas import (
 from clinical_nlp.text import chunk_document, find_occurrence
 from clinical_nlp.validation import validate_entities
 
+_ALLOWED_ENTITY_TYPES = {item.value for item in EntityType}
+
+
+def _drop_unknown_entity_types(data: Any) -> Any:
+    # ponytail: LLM invents labels like THỦ_TỤC; drop those rows, keep schema closed.
+    if not isinstance(data, dict):
+        return data
+    rows = data.get("entities")
+    if not isinstance(rows, list):
+        return data
+    return {
+        **data,
+        "entities": [
+            row
+            for row in rows
+            if isinstance(row, dict) and row.get("type") in _ALLOWED_ENTITY_TYPES
+        ],
+    }
+
 
 class RecoveredEntity(BaseModel):
     text: str
@@ -33,6 +52,11 @@ class RecoveredEntity(BaseModel):
 
 class EntityRecoveryResponse(BaseModel):
     entities: list[RecoveredEntity] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def keep_allowed_types_only(cls, data: Any) -> Any:
+        return _drop_unknown_entity_types(data)
 
 
 class RankedCandidatesResponse(BaseModel):
@@ -49,6 +73,7 @@ class ReviewedEntity(BaseModel):
 
 class EntityReviewResponse(BaseModel):
     entities: list[ReviewedEntity] = Field(default_factory=list)
+    # Do not drop unknown types here: review must cover every supplied position.
 
 
 class CandidateSelection(BaseModel):
@@ -130,7 +155,9 @@ class ClinicalPipeline:
             except Exception as exc:
                 if self.config.run.fail_on_model_unavailable:
                     raise
-                warnings.append(f"LLM recovery unavailable: {type(exc).__name__}: {exc}")
+                warnings.append(
+                    f"LLM recovery unavailable: {type(exc).__name__}: {exc}"
+                )
 
         merged = merge_proposals(rule_proposals + ner_proposals + llm_proposals)
         assertion_by_position: dict[tuple[int, int], list[str]] = {}
@@ -240,9 +267,7 @@ class ClinicalPipeline:
         ]
         artifacts = DocumentArtifacts(
             chunks=[row.model_dump(mode="json") for row in chunks],
-            rule_proposals=[
-                row.model_dump(mode="json") for row in rule_proposals
-            ],
+            rule_proposals=[row.model_dump(mode="json") for row in rule_proposals],
             ner_proposals=[row.model_dump(mode="json") for row in ner_proposals],
             llm_proposals=[row.model_dump(mode="json") for row in llm_proposals],
             merged_entities=[row.model_dump(mode="json") for row in merged],
@@ -372,10 +397,23 @@ class ClinicalPipeline:
         returned = [tuple(row.position) for row in response.entities]
         if len(returned) != len(set(returned)):
             raise ValueError("LLM entity review returned duplicate positions")
-        if set(returned) != expected:
-            raise ValueError("LLM entity review changed, omitted, or invented positions")
-
+        if set(returned) - expected:
+            raise ValueError(
+                "LLM entity review changed, omitted, or invented positions"
+            )
         decisions = {tuple(row.position): row for row in response.entities}
+        # truncated max_new_tokens drops a decision tail; keep those spans.
+        for proposal in proposals:
+            position = (proposal.start, proposal.end)
+            if position not in decisions:
+                decisions[position] = ReviewedEntity(
+                    position=position,
+                    keep=True,
+                    type=proposal.type,
+                    assertions=[
+                        Assertion(value) for value in initial_assertions[position]
+                    ],
+                )
         reviewed: list[SpanProposal] = []
         reviewed_assertions: dict[tuple[int, int], list[str]] = {}
         artifacts: list[dict[str, Any]] = []
@@ -427,13 +465,10 @@ class ClinicalPipeline:
         limit: int,
     ) -> dict[tuple[int, int], list[LinkCandidate]]:
         selected: dict[tuple[int, int], list[LinkCandidate]] = {
-            (proposal.start, proposal.end): []
-            for proposal, _ in entries
+            (proposal.start, proposal.end): [] for proposal, _ in entries
         }
         with_candidates = [
-            (proposal, candidates)
-            for proposal, candidates in entries
-            if candidates
+            (proposal, candidates) for proposal, candidates in entries if candidates
         ]
         if not with_candidates:
             return selected
@@ -445,8 +480,7 @@ class ClinicalPipeline:
             "the mention and document. Hierarchy/status Z codes are valid only "
             "when the text expresses that factor rather than a disease."
             if task == LLMTask.ICD_RERANK
-            else
-            "For RxNorm, prefer generic SCD when ingredient, strength, and form "
+            else "For RxNorm, prefer generic SCD when ingredient, strength, and form "
             "are supported; choose SBD only for an explicit brand; use IN when "
             "the text supports only the ingredient. Never assume missing details."
         )
@@ -493,19 +527,14 @@ class ClinicalPipeline:
             ],
             BatchCandidateSelectionResponse,
         )
-        expected = {
-            (proposal.start, proposal.end)
-            for proposal, _ in with_candidates
-        }
+        expected = {(proposal.start, proposal.end) for proposal, _ in with_candidates}
         returned = [tuple(row.position) for row in response.selections]
         if len(returned) != len(set(returned)) or set(returned) != expected:
             raise ValueError(
                 "LLM terminology reranking changed, omitted, or invented positions"
             )
         candidates_by_position = {
-            (proposal.start, proposal.end): {
-                row.identifier: row for row in candidates
-            }
+            (proposal.start, proposal.end): {row.identifier: row for row in candidates}
             for proposal, candidates in with_candidates
         }
         for row in response.selections:
@@ -517,9 +546,7 @@ class ClinicalPipeline:
             allowed = candidates_by_position[position]
             if any(identifier not in allowed for identifier in row.candidates):
                 raise ValueError("LLM invented a terminology candidate ID")
-            selected[position] = [
-                allowed[identifier] for identifier in row.candidates
-            ]
+            selected[position] = [allowed[identifier] for identifier in row.candidates]
         return selected
 
     def _recover_entities(
@@ -542,10 +569,7 @@ class ClinicalPipeline:
                     f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
                     "EXISTING_ENTITIES:\n"
                     + str(
-                        [
-                            {"text": row.text, "type": row.type.value}
-                            for row in existing
-                        ]
+                        [{"text": row.text, "type": row.type.value} for row in existing]
                     )
                     + '\nReturn {"entities":[{"text":"exact substring",'
                     '"occurrence":1,"type":"allowed type"}]}.'
@@ -655,8 +679,7 @@ class ClinicalPipeline:
         if not candidates:
             return []
         if candidates[0].score >= 0.92 and (
-            len(candidates) == 1
-            or candidates[0].score - candidates[1].score >= 0.12
+            len(candidates) == 1 or candidates[0].score - candidates[1].score >= 0.12
         ):
             return candidates[:1]
         if isinstance(self.llm_backend, NoopLLMBackend):
@@ -678,7 +701,7 @@ class ClinicalPipeline:
                         f"{row.identifier} — {row.name} ({row.terminology_type})"
                         for row in candidates
                     )
-                    + f'\nReturn at most {limit}: '
+                    + f"\nReturn at most {limit}: "
                     '{"candidates":["ID"],"confidence":0.0}'
                 ),
             },
@@ -704,10 +727,6 @@ class ClinicalPipeline:
         return {
             "position": [proposal.start, proposal.end],
             "text": proposal.text,
-            "retrieved_candidates": [
-                row.model_dump(mode="json") for row in retrieved
-            ],
-            "selected_candidates": [
-                row.model_dump(mode="json") for row in selected
-            ],
+            "retrieved_candidates": [row.model_dump(mode="json") for row in retrieved],
+            "selected_candidates": [row.model_dump(mode="json") for row in selected],
         }
