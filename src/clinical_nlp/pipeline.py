@@ -353,7 +353,7 @@ class ClinicalPipeline:
             llm_recovery_audit=llm_recovery_audit,
             merged_entities=[row.model_dump(mode="json") for row in merged],
             llm_reviews=llm_reviews,
-            llm_calls=self._document_call_audits(document.id),
+            llm_calls=self._document_call_audits(document.id, checkpoint_dir),
             assertions=assertion_rows,
             icd_candidates=icd_artifacts,
             rxnorm_candidates=rxnorm_artifacts,
@@ -409,6 +409,7 @@ class ClinicalPipeline:
             max_new_tokens=PREFLIGHT_MAX_NEW_TOKENS,
             reasoning_enabled=False,
             call_id="preflight/model-json",
+            cache_enabled=False,
         )
         if response.status != "ok" or response.sum != 4:
             raise RuntimeError("LLM preflight returned an unexpected response")
@@ -1299,11 +1300,25 @@ class ClinicalPipeline:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             return list(executor.map(function, items))
 
-    def _document_call_audits(self, document_id: str) -> list[dict[str, Any]]:
+    def _document_call_audits(
+        self,
+        document_id: str,
+        checkpoint_dir: Path | None,
+    ) -> list[dict[str, Any]]:
+        prefix = f"{document_id}/"
+        if checkpoint_dir is not None:
+            audit_dir = checkpoint_dir / "audits"
+            if audit_dir.exists():
+                return sorted(
+                    (
+                        json.loads(path.read_text("utf-8"))
+                        for path in audit_dir.glob("*.json")
+                    ),
+                    key=lambda row: (row["call_id"], row["cache_key"]),
+                )
         method = getattr(self.llm_backend, "call_audits", None)
         if method is None:
             return []
-        prefix = f"{document_id}/"
         return [
             row
             for row in method()

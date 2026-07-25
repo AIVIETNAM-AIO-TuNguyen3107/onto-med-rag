@@ -29,6 +29,7 @@ class LLMBackend(Protocol):
         reasoning_enabled: bool | None = None,
         call_id: str | None = None,
         checkpoint_dir: Path | None = None,
+        cache_enabled: bool = True,
     ) -> BaseModel: ...
 
 
@@ -44,8 +45,9 @@ class NoopLLMBackend:
         reasoning_enabled: bool | None = None,
         call_id: str | None = None,
         checkpoint_dir: Path | None = None,
+        cache_enabled: bool = True,
     ) -> BaseModel:
-        del reasoning_enabled, call_id, checkpoint_dir
+        del reasoning_enabled, call_id, checkpoint_dir, cache_enabled
         raise RuntimeError("LLM backend is unavailable")
 
 

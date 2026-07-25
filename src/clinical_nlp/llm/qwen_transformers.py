@@ -44,8 +44,9 @@ class QwenTransformersBackend:
         reasoning_enabled: bool | None = None,
         call_id: str | None = None,
         checkpoint_dir: Path | None = None,
+        cache_enabled: bool = True,
     ) -> BaseModel:
-        del call_id, checkpoint_dir
+        del call_id, checkpoint_dir, cache_enabled
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,

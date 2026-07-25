@@ -304,6 +304,34 @@ def test_validated_response_cache_and_checkpoint_store_no_raw_reasoning(
     assert "test-token" not in stored_text
 
 
+def test_cache_can_be_bypassed_for_live_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    session = FakeSession(
+        [
+            FakeResponse(200, _body('{"status":"ok"}')),
+            FakeResponse(200, _body('{"status":"live"}')),
+        ]
+    )
+    backend = OpenAICompatibleBackend(
+        _config(),
+        session=session,
+        cache_path=tmp_path / "llm.sqlite3",
+    )
+    kwargs = {
+        "task": LLMTask.ENTITY_RECOVERY,
+        "messages": [{"role": "user", "content": "preflight"}],
+        "response_schema": SmokeResponse,
+        "cache_enabled": False,
+    }
+
+    assert backend.generate_json(**kwargs).status == "ok"
+    assert backend.generate_json(**kwargs).status == "live"
+    assert len(session.calls) == 2
+
+
 def test_failed_non_retryable_call_is_safely_audited(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

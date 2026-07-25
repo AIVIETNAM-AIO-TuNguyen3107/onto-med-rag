@@ -61,6 +61,7 @@ class OpenAICompatibleBackend:
         reasoning_enabled: bool | None = None,
         call_id: str | None = None,
         checkpoint_dir: Path | None = None,
+        cache_enabled: bool = True,
     ) -> BaseModel:
         started = time.monotonic()
         completion_tokens = max_new_tokens or self.config.max_new_tokens
@@ -83,10 +84,14 @@ class OpenAICompatibleBackend:
             cache_key,
         )
 
-        checkpoint = self._load_checkpoint(
-            checkpoint_path,
-            cache_key,
-            response_schema,
+        checkpoint = (
+            self._load_checkpoint(
+                checkpoint_path,
+                cache_key,
+                response_schema,
+            )
+            if cache_enabled
+            else None
         )
         if checkpoint is not None:
             parsed, metadata = checkpoint
@@ -105,7 +110,11 @@ class OpenAICompatibleBackend:
             )
             return parsed
 
-        cached = self.cache.get(cache_key) if self.cache is not None else None
+        cached = (
+            self.cache.get(cache_key)
+            if cache_enabled and self.cache is not None
+            else None
+        )
         if cached is not None:
             payload, metadata = cached
             parsed = response_schema.model_validate(payload)
@@ -175,18 +184,19 @@ class OpenAICompatibleBackend:
             aggregate_usage = _merge_usage(aggregate_usage, phase_usage)
             metadata["usage"] = aggregate_usage
             self._record_success_metadata(metadata)
-            if self.cache is not None:
+            if cache_enabled and self.cache is not None:
                 self.cache.put(
                     cache_key,
                     parsed.model_dump(mode="json"),
                     metadata,
                 )
-            self._write_checkpoint(
-                checkpoint_path,
-                cache_key,
-                parsed,
-                metadata,
-            )
+            if cache_enabled:
+                self._write_checkpoint(
+                    checkpoint_path,
+                    cache_key,
+                    parsed,
+                    metadata,
+                )
             self._record_audit(
                 {
                     "task": task.value,
