@@ -287,8 +287,26 @@ class OpenAICompatibleBackend:
                     continue
                 response.raise_for_status()
                 body = response.json()
-                choice = body["choices"][0]
-                message = choice["message"]
+                try:
+                    choices = body.get("choices")
+                    if (
+                        not isinstance(choices, list)
+                        or not choices
+                        or not isinstance(choices[0], dict)
+                    ):
+                        raise _MalformedProviderResponse(
+                            "provider response has no valid choices"
+                        )
+                    choice = choices[0]
+                    message = choice.get("message")
+                    if not isinstance(message, dict):
+                        raise _MalformedProviderResponse(
+                            "provider response choice has no valid message"
+                        )
+                except AttributeError as exc:
+                    raise _MalformedProviderResponse(
+                        "provider response body is not a JSON object"
+                    ) from exc
                 metadata = _safe_metadata(body, choice, message)
                 usage = _usage_from_metadata(metadata)
                 if choice.get("finish_reason") == "length":
@@ -326,6 +344,13 @@ class OpenAICompatibleBackend:
                 if transient_attempt >= self.config.max_retries:
                     raise RuntimeError(
                         f"{task.value} exhausted transient request retries"
+                    ) from exc
+                time.sleep(min(2.0**transient_attempt, 10.0))
+            except _MalformedProviderResponse as exc:
+                last_error = exc
+                if transient_attempt >= self.config.max_retries:
+                    raise RuntimeError(
+                        f"{task.value} exhausted malformed response retries"
                     ) from exc
                 time.sleep(min(2.0**transient_attempt, 10.0))
         raise RuntimeError(f"{task.value} request phase failed") from last_error
@@ -504,6 +529,10 @@ class _DecisionResponseError(Exception):
         self.attempts = attempts
         self.metadata = metadata
         self.usage = usage
+
+
+class _MalformedProviderResponse(Exception):
+    pass
 
 
 def _safe_metadata(

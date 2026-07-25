@@ -127,6 +127,33 @@ def test_huggingface_retries_rate_limit_and_invalid_json(
     assert len(session.calls) == 3
 
 
+def test_huggingface_retries_success_response_without_choices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "clinical_nlp.llm.openai_compatible.time.sleep",
+        lambda _: None,
+    )
+    session = FakeSession(
+        [
+            FakeResponse(200, {"error": {"message": "temporary provider error"}}),
+            FakeResponse(200, _body('{"status":"ok"}')),
+        ]
+    )
+    backend = OpenAICompatibleBackend(_config(), session=session)
+
+    response = backend.generate_json(
+        LLMTask.TYPE_ADJUDICATION,
+        [{"role": "user", "content": "test"}],
+        SmokeResponse,
+    )
+
+    assert response.status == "ok"
+    assert len(session.calls) == 2
+    assert backend.call_audits()[0]["attempts"] == 2
+
+
 def test_huggingface_requires_configured_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
