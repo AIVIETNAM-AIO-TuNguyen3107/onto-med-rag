@@ -144,6 +144,11 @@ def test_post_merge_medication_filter_is_source_independent(
         ("xét nghiệm chuyên sâu", EntityType.TEST_NAME),
         ("đậu tằm", EntityType.SYMPTOM),
         ("nhận xét", EntityType.SYMPTOM),
+        ("hiến máu", EntityType.DIAGNOSIS),
+        (
+            "Glucose-6-Phosphate Dehydrogenase",
+            EntityType.TEST_NAME,
+        ),
     ],
 )
 def test_post_merge_generic_non_entities_are_source_independent(

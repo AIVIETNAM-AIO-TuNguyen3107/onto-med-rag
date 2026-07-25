@@ -59,6 +59,8 @@ POST_MERGE_NON_ENTITIES = {
     "máu khô",
     "đậu tằm",
     "nhận xét",
+    "hiến máu",
+    "glucose 6 phosphate dehydrogenase",
 }
 QUALITATIVE_RESULT_RE = re.compile(r"(?i)^(?:âm\s+tính|dương\s+tính)$")
 NUMERIC_RESULT_RE = re.compile(
