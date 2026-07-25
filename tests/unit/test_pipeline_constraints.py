@@ -117,6 +117,79 @@ def test_entity_review_rejects_assertions_on_lab_results(tmp_path: Path) -> None
         pipeline._review_entities(document, [proposal], {(0, 2): []})
 
 
+def test_entity_review_allows_unsupported_type_only_on_rejected_row(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=False,
+                    type="OTHER",
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho")
+    proposal = SpanProposal(
+        start=0,
+        end=2,
+        text="ho",
+        type=EntityType.SYMPTOM,
+        source="test",
+    )
+    warnings: list[str] = []
+
+    reviewed, reviewed_assertions, artifacts = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): []},
+        warnings=warnings,
+    )
+
+    assert reviewed == []
+    assert reviewed_assertions == {}
+    assert artifacts[0]["returned_type"] == "OTHER"
+    assert artifacts[0]["reviewed_type"] == EntityType.SYMPTOM.value
+    assert artifacts[0]["unsupported_returned_type"] is True
+    assert "unsupported type labels" in warnings[0]
+    assert len(pipeline.llm_backend.calls) == 1
+
+
+def test_entity_review_retries_then_rejects_unsupported_kept_type(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=True,
+                    type="OTHER",
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho")
+    proposal = SpanProposal(
+        start=0,
+        end=2,
+        text="ho",
+        type=EntityType.SYMPTOM,
+        source="test",
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported entity type"):
+        pipeline._review_entities(document, [proposal], {(0, 2): []})
+
+    assert len(pipeline.llm_backend.calls) == 2
+    assert pipeline.llm_backend.calls[0]["reasoning_enabled"] is True
+    assert pipeline.llm_backend.calls[1]["reasoning_enabled"] is False
+
+
 def test_batch_rerank_cannot_invent_candidate_ids(tmp_path: Path) -> None:
     pipeline = _pipeline(
         tmp_path,

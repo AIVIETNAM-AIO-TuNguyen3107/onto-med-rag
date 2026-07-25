@@ -89,7 +89,7 @@ class RankedCandidatesResponse(BaseModel):
 class ReviewedEntity(BaseModel):
     position: tuple[int, int]
     keep: bool
-    type: EntityType
+    type: str
     assertions: list[Assertion] = Field(default_factory=list)
 
 
@@ -522,6 +522,7 @@ class ClinicalPipeline:
         reviewed: list[SpanProposal] = []
         reviewed_assertions: dict[tuple[int, int], list[str]] = {}
         artifacts: list[dict[str, Any]] = list(prefix_artifacts or [])
+        unsupported_rejected_types = 0
         eligible = {
             EntityType.SYMPTOM,
             EntityType.DIAGNOSIS,
@@ -541,7 +542,18 @@ class ClinicalPipeline:
                     )
                 )
                 continue
-            if decision.type not in eligible and decision.assertions:
+            try:
+                reviewed_type = EntityType(decision.type)
+                unsupported_returned_type = False
+            except ValueError:
+                if decision.keep:
+                    raise ValueError(
+                        "LLM kept an entity with an unsupported entity type"
+                    )
+                reviewed_type = proposal.type
+                unsupported_returned_type = True
+                unsupported_rejected_types += 1
+            if reviewed_type not in eligible and decision.assertions:
                 raise ValueError("LLM assigned assertions to an ineligible entity type")
             artifacts.append(
                 {
@@ -550,7 +562,9 @@ class ClinicalPipeline:
                     "initial_type": proposal.type.value,
                     "initial_assertions": initial_assertions[position],
                     "keep": decision.keep,
-                    "reviewed_type": decision.type.value,
+                    "returned_type": decision.type,
+                    "reviewed_type": reviewed_type.value,
+                    "unsupported_returned_type": unsupported_returned_type,
                     "reviewed_assertions": [
                         value.value for value in decision.assertions
                     ],
@@ -566,7 +580,7 @@ class ClinicalPipeline:
             reviewed.append(
                 proposal.model_copy(
                     update={
-                        "type": decision.type,
+                        "type": reviewed_type,
                         "evidence": evidence,
                     }
                 )
@@ -574,6 +588,11 @@ class ClinicalPipeline:
             reviewed_assertions[position] = [
                 value.value for value in decision.assertions
             ]
+        if unsupported_rejected_types:
+            warnings.append(
+                "LLM review rejected "
+                f"{unsupported_rejected_types} row(s) using unsupported type labels"
+            )
         return reviewed, reviewed_assertions, artifacts
 
     def _review_batch(
@@ -661,11 +680,17 @@ class ClinicalPipeline:
             EntityType.DIAGNOSIS,
             EntityType.MEDICATION,
         }
-        if any(
-            row.type not in assertion_eligible and row.assertions
-            for row in response.entities
-        ):
-            return "assertions assigned to an ineligible entity type"
+        for row in response.entities:
+            try:
+                entity_type = EntityType(row.type)
+            except ValueError:
+                if row.keep:
+                    return "unsupported entity type on a kept entity"
+                if row.assertions:
+                    return "assertions assigned to a rejected unsupported type"
+                continue
+            if entity_type not in assertion_eligible and row.assertions:
+                return "assertions assigned to an ineligible entity type"
         return None
 
     def _batch_rerank(
