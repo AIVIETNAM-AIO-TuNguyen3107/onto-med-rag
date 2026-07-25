@@ -214,6 +214,70 @@ def test_selective_uncertainty_gates(tmp_path: Path) -> None:
         assert expected <= set(reasons)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "6.3",
+        "14,43",
+        "38.3°C",
+        "139/68 mmHg",
+    ],
+)
+def test_valid_laboratory_result_spans_are_accepted(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    pipeline = _pipeline(tmp_path)
+
+    assert pipeline._valid_laboratory_result_span(text) is True
+
+
+@pytest.mark.parametrize("text", ["5mg", "1 viên"])
+def test_ambiguous_laboratory_result_spans_still_require_review(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    pipeline = _pipeline(tmp_path)
+    proposal = _proposal(
+        text,
+        entity_type=EntityType.TEST_RESULT,
+        source="gliner",
+        score=0.8,
+    )
+
+    reasons = pipeline._selective_review_reasons(
+        Document(id="1", text=text),
+        proposal,
+        [],
+        [],
+    )
+
+    assert "laboratory_span_policy" in reasons
+
+
+def test_valid_low_confidence_gliner_result_bypasses_review(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(tmp_path)
+    proposal = _proposal(
+        "80%",
+        entity_type=EntityType.TEST_RESULT,
+        source="gliner",
+        score=0.5,
+    )
+
+    reasons = pipeline._selective_review_reasons(
+        Document(id="1", text="80%"),
+        proposal,
+        [],
+        [],
+    )
+
+    assert "low_confidence_gliner_only" not in reasons
+    assert "laboratory_span_policy" not in reasons
+    assert reasons == []
+
+
 def test_exact_linking_threshold_and_normalized_deduplication(
     tmp_path: Path,
 ) -> None:

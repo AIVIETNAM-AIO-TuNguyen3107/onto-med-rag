@@ -63,11 +63,14 @@ POST_MERGE_NON_ENTITIES = {
     "glucose 6 phosphate dehydrogenase",
 }
 QUALITATIVE_RESULT_RE = re.compile(r"(?i)^(?:âm\s+tính|dương\s+tính)$")
+_RESULT_UNIT = (
+    r"%|°\s*[CF]|g/L|mg/L|mg/dL|mmol/L|µmol/L|umol/L|U/L|IU/L|"
+    r"10\^?\d+/L|x10\^?\d+/L|mmHg|bpm|lần/phút|nhịp/phút|kg|cm|mm|ml|cc"
+)
 NUMERIC_RESULT_RE = re.compile(
-    r"(?ix)^[<>]=?\s*[+-]?\d+(?:[.,]\d+)?"
-    r"(?:\s*[-–]\s*[+-]?\d+(?:[.,]\d+)?)?"
-    r"(?:\s*(?:%|g/L|mg/L|mmol/L|µmol/L|umol/L|U/L|IU/L|"
-    r"10\^?\d+/L|x10\^?\d+/L|mmHg|bpm))?$"
+    r"(?ix)^(?:[<>]=?\s*)?[+-]?\d+(?:[.,]\d+)?"
+    r"(?:\s*[-–/]\s*[+-]?\d+(?:[.,]\d+)?)?"
+    rf"(?:\s*(?:{_RESULT_UNIT}))?$"
 )
 
 
@@ -1196,6 +1199,10 @@ class ClinicalPipeline:
         if (
             sources <= {"gliner"}
             and proposal.score < self.config.run.gliner_review_threshold
+            and not (
+                proposal.type == EntityType.TEST_RESULT
+                and self._valid_laboratory_result_span(proposal.text)
+            )
         ):
             reasons.append("low_confidence_gliner_only")
         if proposal.evidence.get("type_conflict"):
