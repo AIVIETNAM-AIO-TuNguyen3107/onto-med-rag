@@ -64,7 +64,9 @@ def _pipeline(tmp_path: Path, response) -> ClinicalPipeline:
     )
 
 
-def test_entity_review_cannot_change_positions(tmp_path: Path) -> None:
+def test_entity_review_invalid_positions_preserve_original_entity(
+    tmp_path: Path,
+) -> None:
     pipeline = _pipeline(
         tmp_path,
         EntityReviewResponse(
@@ -86,11 +88,23 @@ def test_entity_review_cannot_change_positions(tmp_path: Path) -> None:
         source="test",
     )
 
-    with pytest.raises(RuntimeError, match="positions"):
-        pipeline._review_entities(document, [proposal], {(0, 2): []})
+    warnings: list[str] = []
+    reviewed, assertions, artifacts = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): []},
+        warnings=warnings,
+    )
+
+    assert reviewed == [proposal]
+    assert assertions == {(0, 2): []}
+    assert artifacts[0]["decision_source"] == "deterministic_fallback"
+    assert "positions" in artifacts[0]["decision_error"]
+    assert "preserved original entities" in warnings[0]
+    assert len(pipeline.llm_backend.calls) == 2
 
 
-def test_entity_review_rejects_assertions_on_lab_results(tmp_path: Path) -> None:
+def test_invalid_lab_assertions_preserve_original_entity(tmp_path: Path) -> None:
     pipeline = _pipeline(
         tmp_path,
         EntityReviewResponse(
@@ -113,8 +127,15 @@ def test_entity_review_rejects_assertions_on_lab_results(tmp_path: Path) -> None
         source="test",
     )
 
-    with pytest.raises(RuntimeError, match="invalid"):
-        pipeline._review_entities(document, [proposal], {(0, 2): []})
+    reviewed, assertions, artifacts = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): []},
+    )
+
+    assert reviewed == [proposal]
+    assert assertions == {(0, 2): []}
+    assert artifacts[0]["decision_source"] == "deterministic_fallback"
 
 
 def test_entity_review_allows_unsupported_type_only_on_rejected_row(
@@ -158,7 +179,7 @@ def test_entity_review_allows_unsupported_type_only_on_rejected_row(
     assert len(pipeline.llm_backend.calls) == 1
 
 
-def test_entity_review_retries_then_rejects_unsupported_kept_type(
+def test_entity_review_retries_then_preserves_unsupported_kept_type(
     tmp_path: Path,
 ) -> None:
     pipeline = _pipeline(
@@ -182,15 +203,21 @@ def test_entity_review_retries_then_rejects_unsupported_kept_type(
         source="test",
     )
 
-    with pytest.raises(RuntimeError, match="unsupported entity type"):
-        pipeline._review_entities(document, [proposal], {(0, 2): []})
+    reviewed, assertions, artifacts = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): []},
+    )
 
+    assert reviewed == [proposal]
+    assert assertions == {(0, 2): []}
+    assert artifacts[0]["decision_source"] == "deterministic_fallback"
     assert len(pipeline.llm_backend.calls) == 2
     assert pipeline.llm_backend.calls[0]["reasoning_enabled"] is True
     assert pipeline.llm_backend.calls[1]["reasoning_enabled"] is False
 
 
-def test_batch_rerank_cannot_invent_candidate_ids(tmp_path: Path) -> None:
+def test_batch_rerank_invented_ids_fall_back_to_empty(tmp_path: Path) -> None:
     pipeline = _pipeline(
         tmp_path,
         BatchCandidateSelectionResponse(
@@ -216,13 +243,15 @@ def test_batch_rerank_cannot_invent_candidate_ids(tmp_path: Path) -> None:
         terminology_type="ICD10:disease",
     )
 
-    with pytest.raises(RuntimeError, match="invented"):
-        pipeline._batch_rerank(
-            task="icd_rerank",
-            document=Document(id="x", text="bệnh x"),
-            entries=[(proposal, [candidate])],
-            limit=3,
-        )
+    selected = pipeline._batch_rerank(
+        task="icd_rerank",
+        document=Document(id="x", text="bệnh x"),
+        entries=[(proposal, [candidate])],
+        limit=3,
+    )
+
+    assert selected[(0, 6)] == []
+    assert len(pipeline.llm_backend.calls) == 2
 
 
 def test_entity_review_is_batched_at_ten(tmp_path: Path) -> None:
@@ -402,7 +431,9 @@ def test_repeated_suspicious_recovery_chunk_is_discarded(
     assert len(pipeline.llm_backend.calls) == 2
 
 
-def test_incomplete_review_retries_once_then_fails(tmp_path: Path) -> None:
+def test_incomplete_review_retries_once_then_preserves_original(
+    tmp_path: Path,
+) -> None:
     pipeline = _pipeline(tmp_path, EntityReviewResponse(entities=[]))
     proposal = SpanProposal(
         start=0,
@@ -412,13 +443,19 @@ def test_incomplete_review_retries_once_then_fails(tmp_path: Path) -> None:
         source="test",
     )
 
-    with pytest.raises(RuntimeError, match="invalid"):
-        pipeline._review_entities(
-            Document(id="x", text="ho"),
-            [proposal],
-            {(0, 2): []},
-        )
+    warnings: list[str] = []
+    reviewed, assertions, artifacts = pipeline._review_entities(
+        Document(id="x", text="ho"),
+        [proposal],
+        {(0, 2): []},
+        warnings=warnings,
+    )
 
+    assert reviewed == [proposal]
+    assert assertions == {(0, 2): []}
+    assert artifacts[0]["decision_source"] == "deterministic_fallback"
+    assert "omitted required positions" in artifacts[0]["decision_error"]
+    assert "preserved original entities" in warnings[0]
     assert len(pipeline.llm_backend.calls) == 2
 
 

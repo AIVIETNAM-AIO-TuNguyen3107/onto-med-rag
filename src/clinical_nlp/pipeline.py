@@ -479,6 +479,7 @@ class ClinicalPipeline:
 
         decisions: dict[tuple[int, int], ReviewedEntity] = {}
         batch_by_position: dict[tuple[int, int], int] = {}
+        fallback_by_position: dict[tuple[int, int], str] = {}
         batches = [
             review_proposals[start : start + ENTITY_REVIEW_BATCH_SIZE]
             for start in range(0, len(review_proposals), ENTITY_REVIEW_BATCH_SIZE)
@@ -487,7 +488,7 @@ class ClinicalPipeline:
 
         def review_job(
             job: tuple[int, list[SpanProposal]],
-        ) -> tuple[int, list[ReviewedEntity]]:
+        ) -> tuple[int, list[ReviewedEntity], str | None]:
             batch_index, batch = job
             response = self._review_batch(
                 document,
@@ -511,16 +512,39 @@ class ClinicalPipeline:
                 )
                 error = self._review_response_error(batch, response)
             if error is not None:
-                raise RuntimeError(
-                    f"LLM entity review batch {batch_index} invalid: {error}"
-                )
-            return batch_index, response.entities
+                preserved = [
+                    ReviewedEntity(
+                        position=(proposal.start, proposal.end),
+                        keep=True,
+                        type=proposal.type.value,
+                        assertions=[
+                            Assertion(value)
+                            for value in initial_assertions[
+                                (proposal.start, proposal.end)
+                            ]
+                        ],
+                    )
+                    for proposal in batch
+                ]
+                return batch_index, preserved, error
+            return batch_index, response.entities, None
 
-        for batch_index, rows in self._parallel_map(jobs, review_job):
+        for batch_index, rows, fallback_error in self._parallel_map(
+            jobs,
+            review_job,
+        ):
+            if fallback_error is not None:
+                warnings.append(
+                    "LLM entity review batch "
+                    f"{batch_index} invalid after decision fallback; "
+                    f"preserved original entities: {fallback_error}"
+                )
             for row in rows:
                 position = tuple(row.position)
                 decisions[position] = row
                 batch_by_position[position] = batch_index
+                if fallback_error is not None:
+                    fallback_by_position[position] = fallback_error
 
         reviewed: list[SpanProposal] = []
         reviewed_assertions: dict[tuple[int, int], list[str]] = {}
@@ -572,11 +596,20 @@ class ClinicalPipeline:
                         value.value for value in decision.assertions
                     ],
                     "batch_index": batch_by_position[position],
-                    "decision_source": "llm",
+                    "decision_source": (
+                        "deterministic_fallback"
+                        if position in fallback_by_position
+                        else "llm"
+                    ),
+                    "decision_error": fallback_by_position.get(position),
                     "escalation_reasons": review_reasons[position],
                 }
             )
             if not decision.keep:
+                continue
+            if position in fallback_by_position:
+                reviewed.append(proposal)
+                reviewed_assertions[position] = initial_assertions[position]
                 continue
             evidence = dict(proposal.evidence)
             evidence["llm_reviewed"] = True
@@ -762,8 +795,16 @@ class ClinicalPipeline:
                 )
                 error = self._rerank_response_error(batch, response, limit)
             if error is not None:
-                raise RuntimeError(
-                    f"LLM terminology batch {batch_index} invalid: {error}"
+                return (
+                    batch_index,
+                    [
+                        CandidateSelection(
+                            position=(proposal.start, proposal.end),
+                            candidates=[],
+                            confidence=0.0,
+                        )
+                        for proposal, _ in batch
+                    ],
                 )
             return batch_index, response.selections
 
