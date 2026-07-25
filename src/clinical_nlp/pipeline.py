@@ -45,6 +45,21 @@ POST_MERGE_NON_MEDICATIONS = {
     "thuốc nam",
     "thuốc đông y",
 }
+POST_MERGE_NON_ENTITIES = {
+    "dấu hiệu",
+    "triệu chứng",
+    "xét nghiệm",
+    "xét nghiệm máu",
+    "xét nghiệm chuyên sâu",
+    "sàng lọc",
+    "bệnh bẩm sinh",
+    "nhiễm sắc thể x",
+    "g6pd",
+    "xq28",
+    "máu khô",
+    "đậu tằm",
+    "nhận xét",
+}
 QUALITATIVE_RESULT_RE = re.compile(r"(?i)^(?:âm\s+tính|dương\s+tính)$")
 NUMERIC_RESULT_RE = re.compile(
     r"(?ix)^[<>]=?\s*[+-]?\d+(?:[.,]\d+)?"
@@ -780,6 +795,9 @@ class ClinicalPipeline:
                         "Rerank only supplied terminology candidates. Think "
                         "carefully, then return JSON only. Never invent or modify "
                         f"an identifier. Return at most {limit} IDs per position. "
+                        "Every returned ID must appear in the candidates array for "
+                        "that same position. If the clinically best ID is absent, "
+                        "return an empty candidates list for that position. "
                         f"{policy}"
                     ),
                 },
@@ -967,7 +985,10 @@ class ClinicalPipeline:
         artifacts: list[dict[str, Any]] = []
         for proposal in proposals:
             normalized = normalize_search(proposal.text)
-            reject = proposal.type == EntityType.MEDICATION and (
+            reject_reason: str | None = None
+            if normalized in POST_MERGE_NON_ENTITIES:
+                reject_reason = "source_independent_non_entity_exclusion"
+            elif proposal.type == EntityType.MEDICATION and (
                 normalized in POST_MERGE_NON_MEDICATIONS
                 or bool(
                     re.fullmatch(
@@ -976,8 +997,9 @@ class ClinicalPipeline:
                         normalized,
                     )
                 )
-            )
-            if not reject:
+            ):
+                reject_reason = "source_independent_non_medication_exclusion"
+            if reject_reason is None:
                 kept.append(proposal)
                 continue
             artifacts.append(
@@ -987,7 +1009,7 @@ class ClinicalPipeline:
                     "initial_type": proposal.type.value,
                     "keep": False,
                     "decision_source": "deterministic_filter",
-                    "reason": "source_independent_non_medication_exclusion",
+                    "reason": reject_reason,
                     "supporting_sources": proposal.evidence.get(
                         "supporting_sources",
                         [proposal.source],

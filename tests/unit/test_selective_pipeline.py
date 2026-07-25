@@ -136,6 +136,36 @@ def test_post_merge_medication_filter_is_source_independent(
     assert audit[0]["decision_source"] == "deterministic_filter"
 
 
+@pytest.mark.parametrize(
+    "text,entity_type",
+    [
+        ("Xq28", EntityType.TEST_NAME),
+        ("máu khô", EntityType.TEST_RESULT),
+        ("xét nghiệm chuyên sâu", EntityType.TEST_NAME),
+        ("đậu tằm", EntityType.SYMPTOM),
+        ("nhận xét", EntityType.SYMPTOM),
+    ],
+)
+def test_post_merge_generic_non_entities_are_source_independent(
+    tmp_path: Path,
+    text: str,
+    entity_type: EntityType,
+) -> None:
+    pipeline = _pipeline(tmp_path)
+    kept, audit = pipeline._filter_merged_proposals(
+        [
+            _proposal(
+                text,
+                entity_type=entity_type,
+                source="llm_recovery",
+            )
+        ]
+    )
+
+    assert kept == []
+    assert audit[0]["reason"] == "source_independent_non_entity_exclusion"
+
+
 def test_selective_uncertainty_gates(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path)
     document = Document(id="1", text="Không có ho. 5,0 (cao)")
