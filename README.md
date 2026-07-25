@@ -133,9 +133,40 @@ clinical-nlp --config configs/online_first5.local.yaml validate \
   --run-id online-qwen-rxnav-icd10-first5
 ```
 
-The run refuses to reuse a non-empty output directory. Final submission files
+If a run is interrupted after one or more documents finish, use the same
+configuration, document selection, and run ID with `--resume`:
+
+```bash
+clinical-nlp --config configs/online_first5.local.yaml infer \
+  --documents 1 2 3 4 5 \
+  --run-id online-qwen-rxnav-icd10-first5 \
+  --resume
+```
+
+Resume verifies the original input, model/configuration, and ICD hashes. It
+skips only outputs that still pass schema, offset, and audit-artifact checks;
+otherwise it fails rather than overwriting them. Without `--resume`, the run
+refuses an initialized run ID or non-empty output directory.
+
+Final submission files
 are the five JSON arrays under `runs/online-qwen-rxnav-icd10-first5/outputs/`.
 `quality_summary.json` reports type/assertion/link coverage and empty candidate
 lists; per-document audit directories preserve proposals, constrained Qwen
-decisions, retrieved and selected terminology candidates, warnings, and
-non-secret model metadata. Reasoning content and credentials are never stored.
+decisions, rejected recovery rows, retrieved and selected terminology
+candidates, warnings, and non-secret model metadata. All JSON files are written
+atomically. Reasoning content and credentials are never stored.
+
+The OpenAI-compatible adapter sends `reasoning_effort` by default. Set
+`llm.send_reasoning_effort: false` in the ignored local configuration when a
+provider does not support that field.
+
+For a non-Hugging-Face OpenAI-compatible provider, start from the generic
+template and keep the credential value in the named environment variable:
+
+```bash
+cp configs/api_first5.example.yaml configs/api_first5.local.yaml
+```
+
+Set the provider's exact `/v1`-style base endpoint, returned model ID, and
+credential environment-variable name in the local YAML. Never put the
+credential value itself in the configuration.

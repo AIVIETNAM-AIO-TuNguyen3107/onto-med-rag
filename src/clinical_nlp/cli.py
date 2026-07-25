@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> None:
     run_all = subparsers.add_parser("infer")
     run_all.add_argument("--run-id")
     run_all.add_argument("--documents", nargs="+")
+    run_all.add_argument("--resume", action="store_true")
     validate = subparsers.add_parser("validate")
     validate.add_argument("--run-id", required=True)
     validate.add_argument("--documents", nargs="+")
@@ -184,10 +185,12 @@ def main(argv: list[str] | None = None) -> None:
         result = supervisor.run_document(args.document)
         print(json.dumps({"run_id": supervisor.run_id, **result}, ensure_ascii=False))
     elif args.command == "infer":
+        if args.resume and not args.run_id:
+            parser.error("infer --resume requires --run-id")
         supervisor = RunSupervisor(config, pipeline, run_id=args.run_id)
-        supervisor.preflight(args.documents)
+        supervisor.preflight(args.documents, resume=args.resume)
         supervisor.record_online_preflight(pipeline.online_preflight())
-        results = supervisor.run_all(args.documents)
+        results = supervisor.run_all(args.documents, resume=args.resume)
         expected = (
             set(args.documents)
             if args.documents

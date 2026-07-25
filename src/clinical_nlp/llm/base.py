@@ -24,6 +24,7 @@ class LLMBackend(Protocol):
         task: LLMTask,
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
+        max_new_tokens: int | None = None,
     ) -> BaseModel: ...
 
 
@@ -35,6 +36,7 @@ class NoopLLMBackend:
         task: LLMTask,
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
+        max_new_tokens: int | None = None,
     ) -> BaseModel:
         raise RuntimeError("LLM backend is unavailable")
 
@@ -51,4 +53,3 @@ def create_llm_backend(config: ModelConfig) -> LLMBackend:
 
         return OpenAICompatibleBackend(config)
     raise ValueError(f"unsupported LLM backend: {config.backend}")
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from clinical_nlp.atomic import atomic_write_json
 from clinical_nlp.schemas import Document, Entity
 
 
@@ -29,18 +30,8 @@ def write_entities(
     pretty: bool = True,
 ) -> None:
     validate_entities(document, entities)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = [entity.output_dict() for entity in entities]
-    path.write_text(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2 if pretty else None,
-            separators=None if pretty else (",", ":"),
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(path, payload, pretty=pretty)
 
 
 def validate_output_directory(

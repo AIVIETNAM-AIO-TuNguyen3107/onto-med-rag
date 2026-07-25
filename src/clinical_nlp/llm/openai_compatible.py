@@ -42,6 +42,7 @@ class OpenAICompatibleBackend:
         task: LLMTask,
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
+        max_new_tokens: int | None = None,
     ) -> BaseModel:
         endpoint = self.config.endpoint.rstrip("/") + "/chat/completions"
         headers = {
@@ -51,9 +52,14 @@ class OpenAICompatibleBackend:
         payload = {
             "model": self.config.model_id,
             "messages": messages,
-            "max_tokens": self.config.max_new_tokens,
-            "reasoning_effort": self.config.reasoning_effort,
+            "max_tokens": (
+                max_new_tokens
+                if max_new_tokens is not None
+                else self.config.max_new_tokens
+            ),
         }
+        if self.config.send_reasoning_effort:
+            payload["reasoning_effort"] = self.config.reasoning_effort
         last_error: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
             try:

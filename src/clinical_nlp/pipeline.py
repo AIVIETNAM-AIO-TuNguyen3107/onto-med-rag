@@ -15,6 +15,7 @@ from clinical_nlp.rxnorm_linking import RxNormIndex
 from clinical_nlp.rxnorm_linking.index import query_variants
 from clinical_nlp.schemas import (
     Assertion,
+    Chunk,
     Document,
     Entity,
     EntityType,
@@ -25,10 +26,17 @@ from clinical_nlp.text import chunk_document, find_occurrence
 from clinical_nlp.validation import validate_entities
 
 
+RECOVERY_MAX_NEW_TOKENS = 1536
+REVIEW_MAX_NEW_TOKENS = 2048
+RERANK_MAX_NEW_TOKENS = 1536
+ENTITY_REVIEW_BATCH_SIZE = 20
+TERMINOLOGY_RERANK_BATCH_SIZE = 10
+
+
 class RecoveredEntity(BaseModel):
-    text: str
-    occurrence: int = 1
-    type: EntityType
+    text: str = Field(min_length=1)
+    occurrence: int = Field(default=1, ge=1)
+    type: str
 
 
 class EntityRecoveryResponse(BaseModel):
@@ -73,6 +81,7 @@ class DocumentArtifacts(BaseModel):
     rule_proposals: list[dict[str, Any]]
     ner_proposals: list[dict[str, Any]]
     llm_proposals: list[dict[str, Any]]
+    llm_recovery_audit: list[dict[str, Any]]
     merged_entities: list[dict[str, Any]]
     llm_reviews: list[dict[str, Any]]
     assertions: list[dict[str, Any]]
@@ -122,10 +131,14 @@ class ClinicalPipeline:
         ner_proposals = self._filter_ner_proposals(ner_proposals)
 
         llm_proposals: list[SpanProposal] = []
+        llm_recovery_audit: list[dict[str, Any]] = []
         if not isinstance(self.llm_backend, NoopLLMBackend):
             try:
-                llm_proposals = self._recover_entities(
-                    document, rule_proposals + ner_proposals
+                llm_proposals, llm_recovery_audit = self._recover_entities(
+                    document,
+                    chunks,
+                    rule_proposals + ner_proposals,
+                    warnings,
                 )
             except Exception as exc:
                 if self.config.run.fail_on_model_unavailable:
@@ -245,6 +258,7 @@ class ClinicalPipeline:
             ],
             ner_proposals=[row.model_dump(mode="json") for row in ner_proposals],
             llm_proposals=[row.model_dump(mode="json") for row in llm_proposals],
+            llm_recovery_audit=llm_recovery_audit,
             merged_entities=[row.model_dump(mode="json") for row in merged],
             llm_reviews=llm_reviews,
             assertions=assertion_rows,
@@ -293,6 +307,7 @@ class ClinicalPipeline:
                 },
             ],
             OnlinePreflightResponse,
+            max_new_tokens=128,
         )
         if response.status != "ok" or response.sum != 4:
             raise RuntimeError("LLM preflight returned an unexpected response")
@@ -331,51 +346,101 @@ class ClinicalPipeline:
     ]:
         if isinstance(self.llm_backend, NoopLLMBackend):
             raise RuntimeError("full LLM review requires an active LLM backend")
-        supplied = [
-            {
-                "position": [row.start, row.end],
-                "text": row.text,
-                "type": row.type.value,
-                "assertions": initial_assertions[(row.start, row.end)],
-            }
-            for row in proposals
-        ]
-        response = self.llm_backend.generate_json(
-            LLMTask.ASSERTION_ADJUDICATION,
-            [
+        decisions: dict[tuple[int, int], ReviewedEntity] = {}
+        batch_by_position: dict[tuple[int, int], int] = {}
+        for batch_index, start in enumerate(
+            range(0, len(proposals), ENTITY_REVIEW_BATCH_SIZE)
+        ):
+            batch = proposals[start : start + ENTITY_REVIEW_BATCH_SIZE]
+            supplied = [
                 {
-                    "role": "system",
-                    "content": (
-                        "Review supplied Vietnamese clinical entity spans. Think "
-                        "carefully, then return JSON only. Positions are immutable. "
-                        "Return exactly one decision for every supplied position. "
-                        "Set keep=false for generic/non-clinical false positives. "
-                        "Use only the five allowed entity types. Assertions may only "
-                        "be isNegated, isFamily, isHistorical and are permitted only "
-                        "for symptoms, diagnoses, and medications. Family assertions "
-                        "require contextual evidence, not merely a kinship word."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
-                        f"ENTITIES:\n{json.dumps(supplied, ensure_ascii=False)}\n\n"
-                        'Return {"entities":[{"position":[start,end],"keep":true,'
-                        '"type":"ALLOWED_TYPE","assertions":[]}]}.'
-                    ),
-                },
-            ],
-            EntityReviewResponse,
-        )
-        expected = {(row.start, row.end) for row in proposals}
-        returned = [tuple(row.position) for row in response.entities]
-        if len(returned) != len(set(returned)):
-            raise ValueError("LLM entity review returned duplicate positions")
-        if set(returned) != expected:
-            raise ValueError("LLM entity review changed, omitted, or invented positions")
+                    "position": [row.start, row.end],
+                    "text": row.text,
+                    "type": row.type.value,
+                    "assertions": initial_assertions[(row.start, row.end)],
+                }
+                for row in batch
+            ]
+            expected = {(row.start, row.end) for row in batch}
+            last_error: ValueError | None = None
+            for _ in range(self.config.llm.max_retries + 1):
+                response = self.llm_backend.generate_json(
+                    LLMTask.ASSERTION_ADJUDICATION,
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Review supplied Vietnamese clinical entity spans. "
+                                "Think carefully, then return JSON only. Positions "
+                                "are immutable. Return exactly one decision for every "
+                                "supplied position. Set keep=false for generic or "
+                                "non-clinical false positives. Use only the five "
+                                "allowed entity types. Assertions may only be "
+                                "isNegated, isFamily, isHistorical and are permitted "
+                                "only for symptoms, diagnoses, and medications. "
+                                "Family assertions require contextual evidence, not "
+                                "merely a kinship word."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
+                                "ENTITIES:\n"
+                                f"{json.dumps(supplied, ensure_ascii=False)}\n\n"
+                                'Return {"entities":[{"position":[start,end],'
+                                '"keep":true,"type":"ALLOWED_TYPE",'
+                                '"assertions":[]}]}.'
+                            ),
+                        },
+                    ],
+                    EntityReviewResponse,
+                    max_new_tokens=REVIEW_MAX_NEW_TOKENS,
+                )
+                returned = [tuple(row.position) for row in response.entities]
+                returned_set = set(returned)
+                invented = returned_set - expected
+                if invented:
+                    raise ValueError(
+                        "LLM entity review invented or changed positions: "
+                        f"{sorted(invented)}"
+                    )
+                if len(returned) != len(returned_set):
+                    last_error = ValueError(
+                        "LLM entity review returned duplicate positions"
+                    )
+                    continue
+                if returned_set != expected:
+                    last_error = ValueError(
+                        "LLM entity review omitted required positions"
+                    )
+                    continue
+                invalid_assertion = any(
+                    row.type
+                    not in {
+                        EntityType.SYMPTOM,
+                        EntityType.DIAGNOSIS,
+                        EntityType.MEDICATION,
+                    }
+                    and row.assertions
+                    for row in response.entities
+                )
+                if invalid_assertion:
+                    last_error = ValueError(
+                        "LLM assigned assertions to an ineligible entity type"
+                    )
+                    continue
+                for row in response.entities:
+                    position = tuple(row.position)
+                    decisions[position] = row
+                    batch_by_position[position] = batch_index
+                break
+            else:
+                raise RuntimeError(
+                    "LLM entity review remained incomplete or invalid after "
+                    f"{self.config.llm.max_retries + 1} attempts"
+                ) from last_error
 
-        decisions = {tuple(row.position): row for row in response.entities}
         reviewed: list[SpanProposal] = []
         reviewed_assertions: dict[tuple[int, int], list[str]] = {}
         artifacts: list[dict[str, Any]] = []
@@ -400,6 +465,7 @@ class ClinicalPipeline:
                     "reviewed_assertions": [
                         value.value for value in decision.assertions
                     ],
+                    "batch_index": batch_by_position[position],
                 }
             )
             if not decision.keep:
@@ -450,9 +516,15 @@ class ClinicalPipeline:
             "are supported; choose SBD only for an explicit brand; use IN when "
             "the text supports only the ingredient. Never assume missing details."
         )
-        payload = []
-        for proposal, candidates in with_candidates:
-            payload.append(
+        candidates_by_position = {
+            (proposal.start, proposal.end): {
+                row.identifier: row for row in candidates
+            }
+            for proposal, candidates in with_candidates
+        }
+        for start in range(0, len(with_candidates), TERMINOLOGY_RERANK_BATCH_SIZE):
+            batch = with_candidates[start : start + TERMINOLOGY_RERANK_BATCH_SIZE]
+            payload = [
                 {
                     "position": [proposal.start, proposal.end],
                     "mention": proposal.text,
@@ -467,117 +539,194 @@ class ClinicalPipeline:
                         for row in candidates
                     ],
                 }
-            )
-        response = self.llm_backend.generate_json(
-            task,
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Rerank only supplied terminology candidates. Think "
-                        "carefully, then return JSON only. Never invent or modify "
-                        f"an identifier. Return at most {limit} IDs per position. "
-                        f"{policy}"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
-                        f"MENTIONS:\n{json.dumps(payload, ensure_ascii=False)}\n\n"
-                        'Return {"selections":[{"position":[start,end],'
-                        '"candidates":["ID"],"confidence":0.0}]}. Return exactly '
-                        "one selection for every supplied position."
-                    ),
-                },
-            ],
-            BatchCandidateSelectionResponse,
-        )
-        expected = {
-            (proposal.start, proposal.end)
-            for proposal, _ in with_candidates
-        }
-        returned = [tuple(row.position) for row in response.selections]
-        if len(returned) != len(set(returned)) or set(returned) != expected:
-            raise ValueError(
-                "LLM terminology reranking changed, omitted, or invented positions"
-            )
-        candidates_by_position = {
-            (proposal.start, proposal.end): {
-                row.identifier: row for row in candidates
-            }
-            for proposal, candidates in with_candidates
-        }
-        for row in response.selections:
-            position = tuple(row.position)
-            if len(row.candidates) > limit or len(row.candidates) != len(
-                set(row.candidates)
-            ):
-                raise ValueError("LLM returned too many or duplicate candidate IDs")
-            allowed = candidates_by_position[position]
-            if any(identifier not in allowed for identifier in row.candidates):
-                raise ValueError("LLM invented a terminology candidate ID")
-            selected[position] = [
-                allowed[identifier] for identifier in row.candidates
+                for proposal, candidates in batch
             ]
+            expected = {
+                (proposal.start, proposal.end) for proposal, _ in batch
+            }
+            last_error: ValueError | None = None
+            for _ in range(self.config.llm.max_retries + 1):
+                response = self.llm_backend.generate_json(
+                    task,
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Rerank only supplied terminology candidates. Think "
+                                "carefully, then return JSON only. Never invent or "
+                                f"modify an identifier. Return at most {limit} IDs "
+                                f"per position. {policy}"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
+                                "MENTIONS:\n"
+                                f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+                                'Return {"selections":[{"position":[start,end],'
+                                '"candidates":["ID"],"confidence":0.0}]}. Return '
+                                "exactly one selection for every supplied position."
+                            ),
+                        },
+                    ],
+                    BatchCandidateSelectionResponse,
+                    max_new_tokens=RERANK_MAX_NEW_TOKENS,
+                )
+                returned = [tuple(row.position) for row in response.selections]
+                returned_set = set(returned)
+                invented_positions = returned_set - expected
+                if invented_positions:
+                    raise ValueError(
+                        "LLM terminology reranking invented or changed positions: "
+                        f"{sorted(invented_positions)}"
+                    )
+                if len(returned) != len(returned_set):
+                    last_error = ValueError(
+                        "LLM terminology reranking returned duplicate positions"
+                    )
+                    continue
+                if returned_set != expected:
+                    last_error = ValueError(
+                        "LLM terminology reranking omitted required positions"
+                    )
+                    continue
+                invalid_decision = False
+                for row in response.selections:
+                    position = tuple(row.position)
+                    if len(row.candidates) > limit or len(row.candidates) != len(
+                        set(row.candidates)
+                    ):
+                        last_error = ValueError(
+                            "LLM returned too many or duplicate candidate IDs"
+                        )
+                        invalid_decision = True
+                        break
+                    allowed = candidates_by_position[position]
+                    if any(
+                        identifier not in allowed for identifier in row.candidates
+                    ):
+                        raise ValueError("LLM invented a terminology candidate ID")
+                if invalid_decision:
+                    continue
+                for row in response.selections:
+                    position = tuple(row.position)
+                    allowed = candidates_by_position[position]
+                    selected[position] = [
+                        allowed[identifier] for identifier in row.candidates
+                    ]
+                break
+            else:
+                raise RuntimeError(
+                    "LLM terminology reranking remained incomplete after "
+                    f"{self.config.llm.max_retries + 1} attempts"
+                ) from last_error
         return selected
 
     def _recover_entities(
         self,
         document: Document,
+        chunks: list[Chunk],
         existing: list[SpanProposal],
-    ) -> list[SpanProposal]:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Extract only explicit clinical entities. Copy text exactly. "
-                    "Never generate offsets. Return missing entities only. Think "
-                    "carefully, then return JSON only in the final answer."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
-                    "EXISTING_ENTITIES:\n"
-                    + str(
-                        [
-                            {"text": row.text, "type": row.type.value}
-                            for row in existing
-                        ]
-                    )
-                    + '\nReturn {"entities":[{"text":"exact substring",'
-                    '"occurrence":1,"type":"allowed type"}]}.'
-                ),
-            },
-        ]
-        response = self.llm_backend.generate_json(
-            LLMTask.ENTITY_RECOVERY,
-            messages,
-            EntityRecoveryResponse,
-        )
+        warnings: list[str],
+    ) -> tuple[list[SpanProposal], list[dict[str, Any]]]:
         proposals: list[SpanProposal] = []
-        for row in response.entities:
-            try:
-                start, end = find_occurrence(
-                    document.text,
-                    row.text,
-                    row.occurrence,
-                )
-            except ValueError:
-                continue
-            proposals.append(
-                SpanProposal(
-                    start=start,
-                    end=end,
-                    text=row.text,
-                    type=row.type,
-                    source="llm_recovery",
-                    score=0.70,
-                )
+        audit: list[dict[str, Any]] = []
+        unsupported_types = 0
+        missing_substrings = 0
+        for chunk in chunks:
+            chunk_existing = [
+                {"text": row.text, "type": row.type.value}
+                for row in existing
+                if row.start >= chunk.start and row.end <= chunk.end
+            ]
+            response = self.llm_backend.generate_json(
+                LLMTask.ENTITY_RECOVERY,
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract only explicit clinical entities. Copy text "
+                            "exactly. Never generate offsets. Return missing entities "
+                            "only. Think carefully, then return JSON only in the "
+                            "final answer. Allowed types are TRIỆU_CHỨNG, "
+                            "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"TEXT_CHUNK:\n<<<\n{chunk.text}\n>>>\n\n"
+                            "EXISTING_ENTITIES:\n"
+                            f"{json.dumps(chunk_existing, ensure_ascii=False)}\n"
+                            'Return {"entities":[{"text":"exact substring",'
+                            '"occurrence":1,"type":"allowed type"}]}.'
+                        ),
+                    },
+                ],
+                EntityRecoveryResponse,
+                max_new_tokens=RECOVERY_MAX_NEW_TOKENS,
             )
-        return proposals
+            for row in response.entities:
+                type_value = row.type.strip()
+                try:
+                    entity_type = EntityType(type_value)
+                except ValueError:
+                    unsupported_types += 1
+                    audit.append(
+                        {
+                            "chunk_index": chunk.index,
+                            "text": row.text,
+                            "type": row.type,
+                            "occurrence": row.occurrence,
+                            "status": "rejected",
+                            "reason": "unsupported_entity_type",
+                        }
+                    )
+                    continue
+                try:
+                    relative_start, relative_end = find_occurrence(
+                        chunk.text,
+                        row.text,
+                        row.occurrence,
+                    )
+                except ValueError:
+                    missing_substrings += 1
+                    audit.append(
+                        {
+                            "chunk_index": chunk.index,
+                            "text": row.text,
+                            "type": type_value,
+                            "occurrence": row.occurrence,
+                            "status": "rejected",
+                            "reason": "substring_not_found_in_chunk",
+                        }
+                    )
+                    continue
+                start = chunk.start + relative_start
+                end = chunk.start + relative_end
+                proposals.append(
+                    SpanProposal(
+                        start=start,
+                        end=end,
+                        text=document.text[start:end],
+                        type=entity_type,
+                        source="llm_recovery",
+                        score=0.70,
+                        evidence={"chunk_index": chunk.index},
+                    )
+                )
+        if unsupported_types:
+            warnings.append(
+                "LLM recovery rejected "
+                f"{unsupported_types} row(s) with unsupported entity types"
+            )
+        if missing_substrings:
+            warnings.append(
+                "LLM recovery rejected "
+                f"{missing_substrings} row(s) not found exactly in their chunks"
+            )
+        return proposals, audit
 
     @staticmethod
     def _filter_ner_proposals(
@@ -688,6 +837,7 @@ class ClinicalPipeline:
                 task,
                 messages,
                 RankedCandidatesResponse,
+                max_new_tokens=RERANK_MAX_NEW_TOKENS,
             )
         except Exception as exc:
             warnings.append(f"{task.value} failed: {type(exc).__name__}: {exc}")

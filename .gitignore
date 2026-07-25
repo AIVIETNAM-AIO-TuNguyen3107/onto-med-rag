@@ -29,6 +29,7 @@ artifacts/
 
 # Local credentials, paths, and model caches
 temporaryHFtoken.csv
+temporarytoken.csv
 configs/*.local.yaml
 .cache/
 huggingface/

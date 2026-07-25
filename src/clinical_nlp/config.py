@@ -45,6 +45,7 @@ class ModelConfig(BaseModel):
     model_id: str
     local_files_only: bool = False
     reasoning_effort: str = "high"
+    send_reasoning_effort: bool = True
     thinking: bool = True
     max_new_tokens: int = 4096
     max_retries: int = 2

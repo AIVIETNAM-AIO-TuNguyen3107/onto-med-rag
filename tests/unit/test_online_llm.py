@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import requests
 from pydantic import BaseModel
 
 from clinical_nlp.config import ModelConfig
@@ -36,13 +37,16 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, responses: list[FakeResponse]) -> None:
+    def __init__(self, responses: list[FakeResponse | Exception]) -> None:
         self.responses = responses
         self.calls: list[dict] = []
 
     def post(self, url: str, **kwargs):
         self.calls.append({"url": url, **kwargs})
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _body(content: str, reasoning: str | None = None) -> dict:
@@ -84,11 +88,13 @@ def test_huggingface_payload_omits_unsupported_extra_body(
         LLMTask.ENTITY_RECOVERY,
         [{"role": "user", "content": "test"}],
         SmokeResponse,
+        max_new_tokens=128,
     )
 
     assert response.status == "ok"
     assert "extra_body" not in session.calls[0]["json"]
     assert session.calls[0]["json"]["reasoning_effort"] == "high"
+    assert session.calls[0]["json"]["max_tokens"] == 128
     assert backend.last_response_metadata["reasoning_present"] is True
     assert "hidden" not in json.dumps(backend.last_response_metadata)
 
@@ -129,14 +135,16 @@ def test_huggingface_requires_configured_token(
         OpenAICompatibleBackend(_config(), session=FakeSession([]))
 
 
+@pytest.mark.parametrize("status_code", [400, 401, 402, 403])
 def test_huggingface_does_not_retry_non_retryable_4xx(
     monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
 ) -> None:
     monkeypatch.setenv("HF_TOKEN", "test-token")
-    session = FakeSession([FakeResponse(402, {})])
+    session = FakeSession([FakeResponse(status_code, {})])
     backend = OpenAICompatibleBackend(_config(), session=session)
 
-    with pytest.raises(RuntimeError, match="status 402"):
+    with pytest.raises(RuntimeError, match=f"status {status_code}"):
         backend.generate_json(
             LLMTask.ENTITY_RECOVERY,
             [{"role": "user", "content": "test"}],
@@ -144,3 +152,54 @@ def test_huggingface_does_not_retry_non_retryable_4xx(
         )
 
     assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "first_response",
+    [
+        FakeResponse(500, {}),
+        requests.Timeout("timed out"),
+    ],
+)
+def test_huggingface_retries_server_error_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    first_response: FakeResponse | Exception,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "clinical_nlp.llm.openai_compatible.time.sleep",
+        lambda _: None,
+    )
+    session = FakeSession(
+        [
+            first_response,
+            FakeResponse(200, _body('{"status":"ok"}')),
+        ]
+    )
+    backend = OpenAICompatibleBackend(_config(), session=session)
+
+    response = backend.generate_json(
+        LLMTask.ENTITY_RECOVERY,
+        [{"role": "user", "content": "test"}],
+        SmokeResponse,
+    )
+
+    assert response.status == "ok"
+    assert len(session.calls) == 2
+
+
+def test_reasoning_effort_payload_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    config = _config().model_copy(update={"send_reasoning_effort": False})
+    session = FakeSession([FakeResponse(200, _body('{"status":"ok"}'))])
+    backend = OpenAICompatibleBackend(config, session=session)
+
+    backend.generate_json(
+        LLMTask.ENTITY_RECOVERY,
+        [{"role": "user", "content": "test"}],
+        SmokeResponse,
+    )
+
+    assert "reasoning_effort" not in session.calls[0]["json"]

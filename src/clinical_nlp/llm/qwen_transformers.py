@@ -39,6 +39,7 @@ class QwenTransformersBackend:
         task: LLMTask,
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
+        max_new_tokens: int | None = None,
     ) -> BaseModel:
         inputs = self.processor.apply_chat_template(
             messages,
@@ -52,7 +53,11 @@ class QwenTransformersBackend:
         for _ in range(self.config.max_retries + 1):
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=self.config.max_new_tokens,
+                max_new_tokens=(
+                    max_new_tokens
+                    if max_new_tokens is not None
+                    else self.config.max_new_tokens
+                ),
                 do_sample=False,
             )
             generated = outputs[0][inputs["input_ids"].shape[-1] :]

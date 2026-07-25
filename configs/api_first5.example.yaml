@@ -1,3 +1,5 @@
+# Copy to configs/api_first5.local.yaml, then set the exact provider endpoint,
+# model ID, credential environment-variable name, and machine-local paths.
 paths:
   input_dir: input
   runs_dir: runs
@@ -7,7 +9,7 @@ paths:
   icd_catalog_csv: artifacts/icd10_tt06_vi.csv
   icd_catalog_manifest: artifacts/icd10_tt06_vi.manifest.json
   icd_index: artifacts/icd_index.json
-  rxnorm_cache: artifacts/rxnorm_online_first5_cache.json
+  rxnorm_cache: artifacts/rxnorm_api_first5_cache.json
 
 entity_finding:
   chunk_chars: 1400
@@ -21,9 +23,9 @@ ner:
 
 llm:
   backend: openai_compatible
-  model_id: Qwen/Qwen3.5-9B:fastest
-  endpoint: https://router.huggingface.co/v1
-  api_key_env: HF_TOKEN
+  model_id: REPLACE_WITH_EXACT_MODEL_ID
+  endpoint: https://provider.example/v1
+  api_key_env: CLINICAL_LLM_API_KEY
   reasoning_effort: high
   send_reasoning_effort: true
   thinking: true
