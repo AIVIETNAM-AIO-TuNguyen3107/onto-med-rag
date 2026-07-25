@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -271,8 +272,10 @@ class RunSupervisor:
                 "run output directory is not empty; use --resume or a new run ID: "
                 f"{existing_outputs}"
             )
-        results: list[dict[str, Any]] = []
-        for index, path in enumerate(files, start=1):
+        results_by_id: dict[str, dict[str, Any]] = {}
+        completed = 0
+
+        def process_path(path: Path) -> tuple[dict[str, Any], str]:
             output_path = output_dir / f"{path.stem}.json"
             if resume and output_path.exists():
                 result = self._load_completed_document(path.stem)
@@ -281,11 +284,20 @@ class RunSupervisor:
             else:
                 result = self.run_document(path.stem)
                 progress_status = result["status"]
-            results.append(result)
+            return result, progress_status
+
+        def record_result(
+            path: Path,
+            result: dict[str, Any],
+            progress_status: str,
+        ) -> None:
+            nonlocal completed
+            completed += 1
+            results_by_id[path.stem] = result
             print(
                 json.dumps(
                     {
-                        "progress": f"{index}/{len(files)}",
+                        "progress": f"{completed}/{len(files)}",
                         "document_id": path.stem,
                         "status": progress_status,
                         "entities": result["entity_count"],
@@ -296,6 +308,49 @@ class RunSupervisor:
                 ),
                 flush=True,
             )
+
+        document_concurrency = self.config.run.document_concurrency
+        if document_concurrency <= 1 or len(files) <= 1:
+            for path in files:
+                result, progress_status = process_path(path)
+                record_result(path, result, progress_status)
+        else:
+            workers = min(document_concurrency, len(files))
+            remaining = iter(files)
+            file_order = {path: index for index, path in enumerate(files)}
+            executor = ThreadPoolExecutor(max_workers=workers)
+            futures = {}
+            try:
+                for _ in range(workers):
+                    path = next(remaining)
+                    futures[executor.submit(process_path, path)] = path
+                while futures:
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    completed_rows = []
+                    for future in sorted(
+                        done,
+                        key=lambda row: file_order[futures[row]],
+                    ):
+                        path = futures.pop(future)
+                        result, progress_status = future.result()
+                        completed_rows.append((path, result, progress_status))
+                    for path, result, progress_status in completed_rows:
+                        record_result(path, result, progress_status)
+                    for _ in completed_rows:
+                        try:
+                            path = next(remaining)
+                        except StopIteration:
+                            break
+                        futures[executor.submit(process_path, path)] = path
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+
+        results = [results_by_id[path.stem] for path in files]
         _write_json(
             self.run_dir / "stages" / "09_validation_summary.json",
             {

@@ -77,6 +77,7 @@ class LinkingConfig(BaseModel):
 class RunConfig(BaseModel):
     fail_on_model_unavailable: bool = False
     pretty_json: bool = True
+    document_concurrency: int = Field(default=1, ge=1, le=8)
     llm_full_review: bool | None = None
     llm_review_mode: Literal["off", "selective", "full"] | None = None
     gliner_review_threshold: float = Field(default=0.65, ge=0, le=1)

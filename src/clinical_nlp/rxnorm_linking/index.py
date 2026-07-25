@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -46,6 +47,7 @@ class RxNormIndex:
         self.session = session or requests.Session()
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
+        self._lock = threading.RLock()
         self.concepts: dict[str, dict[str, str]] = dict(SEED_CONCEPTS)
         self.queries: dict[str, list[dict[str, Any]]] = {}
         if cache_path.exists():
@@ -65,26 +67,30 @@ class RxNormIndex:
                     self.queries[key] = rows
 
     def save(self) -> None:
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "version": 2,
-                    "concepts": self.concepts,
-                    "queries": self.queries,
-                },
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
+        with self._lock:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.cache_path.with_suffix(
+                self.cache_path.suffix + ".tmp"
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(self.cache_path)
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "concepts": self.concepts,
+                        "queries": self.queries,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(self.cache_path)
 
     def contains(self, rxcui: str) -> bool:
-        return rxcui in self.concepts
+        with self._lock:
+            return rxcui in self.concepts
 
     def _api_json(self, resource: str, params: dict[str, str]) -> dict[str, Any]:
         last_error: Exception | None = None
@@ -217,6 +223,10 @@ class RxNormIndex:
         ]
 
     def retrieve(self, mention: str, limit: int = 20) -> list[LinkCandidate]:
+        with self._lock:
+            return self._retrieve(mention, limit)
+
+    def _retrieve(self, mention: str, limit: int) -> list[LinkCandidate]:
         key = normalize_search(mention)
         if not key:
             return []

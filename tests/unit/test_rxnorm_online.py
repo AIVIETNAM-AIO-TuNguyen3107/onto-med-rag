@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -39,6 +42,43 @@ class FakeSession:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class ConcurrentSession:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def get(self, url: str, **kwargs):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.01)
+            if url.endswith("/rxcui.json"):
+                identifier = (
+                    "901"
+                    if kwargs["params"]["name"].startswith("alpha")
+                    else "902"
+                )
+                return FakeResponse(
+                    200,
+                    {"idGroup": {"rxnormId": [identifier]}},
+                )
+            identifier = url.split("/rxcui/", 1)[1].split("/", 1)[0]
+            return FakeResponse(
+                200,
+                {
+                    "properties": {
+                        "name": f"example {identifier} tablet",
+                        "tty": "SCD",
+                    }
+                },
+            )
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 def test_exact_lookup_fetches_properties_and_reuses_cache(tmp_path: Path) -> None:
@@ -133,3 +173,23 @@ def test_rxnav_does_not_retry_non_retryable_4xx(tmp_path: Path) -> None:
         index.retrieve("missing")
 
     assert len(session.calls) == 1
+
+
+def test_concurrent_retrieval_serializes_cache_mutation(tmp_path: Path) -> None:
+    session = ConcurrentSession()
+    cache = tmp_path / "rxnorm.json"
+    index = RxNormIndex(cache, use_api=True, session=session)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                index.retrieve,
+                ["alpha 10 mg", "beta 20 mg"],
+            )
+        )
+
+    assert session.max_active == 1
+    assert [rows[0].identifier for rows in results] == ["901", "902"]
+    payload = json.loads(cache.read_text("utf-8"))
+    assert set(payload["queries"]) >= {"alpha 10 mg", "beta 20 mg"}
+    assert set(payload["concepts"]) >= {"901", "902"}

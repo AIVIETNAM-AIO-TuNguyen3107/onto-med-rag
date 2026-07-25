@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from clinical_nlp.ner.base import LABEL_MAP, LABELS
 from clinical_nlp.schemas import Chunk, Document, EntityType, SpanProposal
 from clinical_nlp.text import validate_chunk
@@ -18,6 +20,7 @@ class GLiNERBackend:
             model_id,
             local_files_only=local_files_only,
         )
+        self._prediction_lock = threading.Lock()
 
     def predict(
         self,
@@ -29,11 +32,12 @@ class GLiNERBackend:
         seen: set[tuple[int, int, str]] = set()
         for chunk in chunks:
             validate_chunk(document, chunk)
-            rows = self.model.predict_entities(
-                chunk.text,
-                labels=LABELS,
-                threshold=threshold,
-            )
+            with self._prediction_lock:
+                rows = self.model.predict_entities(
+                    chunk.text,
+                    labels=LABELS,
+                    threshold=threshold,
+                )
             for row in rows:
                 mapped = LABEL_MAP.get(row["label"])
                 if mapped is None:
@@ -59,4 +63,3 @@ class GLiNERBackend:
                     )
                 )
         return proposals
-
