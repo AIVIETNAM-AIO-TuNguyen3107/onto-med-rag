@@ -249,6 +249,86 @@ def test_recovery_audits_unknown_types_and_uses_chunk_budget(
     assert pipeline.llm_backend.calls[0]["max_new_tokens"] == 1536
 
 
+def test_suspicious_recovery_chunk_retries_once_without_reasoning(
+    tmp_path: Path,
+) -> None:
+    pathological = EntityRecoveryResponse(
+        entities=[
+            RecoveredEntity(
+                text="x",
+                occurrence=1,
+                type=EntityType.SYMPTOM.value,
+            )
+            for _ in range(41)
+        ]
+    )
+    clean = EntityRecoveryResponse(
+        entities=[
+            RecoveredEntity(
+                text="ho",
+                occurrence=1,
+                type=EntityType.SYMPTOM.value,
+            )
+        ]
+    )
+    pipeline = _pipeline(tmp_path, [pathological, clean])
+    document = Document(id="x", text="ho")
+    from clinical_nlp.text import chunk_document
+
+    warnings: list[str] = []
+    proposals, audit = pipeline._recover_entities(
+        document,
+        chunk_document(document, max_chars=100, overlap_chars=10),
+        [],
+        warnings,
+    )
+
+    assert [row.text for row in proposals] == ["ho"]
+    assert audit[0]["status"] == "retried"
+    assert audit[0]["initial_row_count"] == 41
+    assert "retried 1 suspicious" in warnings[0]
+    assert len(pipeline.llm_backend.calls) == 2
+    assert all(
+        row["reasoning_enabled"] is False
+        for row in pipeline.llm_backend.calls
+    )
+    assert pipeline.llm_backend.calls[1]["call_id"].endswith(
+        "-quality-fallback"
+    )
+
+
+def test_repeated_suspicious_recovery_chunk_is_discarded(
+    tmp_path: Path,
+) -> None:
+    pathological = EntityRecoveryResponse(
+        entities=[
+            RecoveredEntity(
+                text="x",
+                occurrence=1,
+                type=EntityType.SYMPTOM.value,
+            )
+            for _ in range(41)
+        ]
+    )
+    pipeline = _pipeline(tmp_path, [pathological, pathological])
+    document = Document(id="x", text="ho")
+    from clinical_nlp.text import chunk_document
+
+    warnings: list[str] = []
+    proposals, audit = pipeline._recover_entities(
+        document,
+        chunk_document(document, max_chars=100, overlap_chars=10),
+        [],
+        warnings,
+    )
+
+    assert proposals == []
+    assert audit[0]["status"] == "rejected"
+    assert audit[0]["retry_row_count"] == 41
+    assert "discarded 1 suspicious" in warnings[0]
+    assert len(pipeline.llm_backend.calls) == 2
+
+
 def test_incomplete_review_retries_once_then_fails(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path, EntityReviewResponse(entities=[]))
     proposal = SpanProposal(

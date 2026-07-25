@@ -877,48 +877,71 @@ class ClinicalPipeline:
         audit: list[dict[str, Any]] = []
         unsupported_types = 0
         missing_substrings = 0
+        quality_retries = 0
+        quality_rejections = 0
 
         def recovery_job(
             chunk: Chunk,
-        ) -> tuple[Chunk, EntityRecoveryResponse]:
+        ) -> tuple[Chunk, EntityRecoveryResponse, dict[str, Any] | None]:
             chunk_existing = [
                 {"text": row.text, "type": row.type.value}
                 for row in existing
                 if row.start >= chunk.start and row.end <= chunk.end
             ]
-            response = self.llm_backend.generate_json(
-                LLMTask.ENTITY_RECOVERY,
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Exhaustively extract explicit clinical entities that "
-                            "are absent from EXISTING_ENTITIES. Copy text exactly. "
-                            "Never generate offsets or repeat an existing entity. "
-                            "Return JSON only. Allowed types are TRIỆU_CHỨNG, "
-                            "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"TEXT_CHUNK:\n<<<\n{chunk.text}\n>>>\n\n"
-                            "EXISTING_ENTITIES:\n"
-                            f"{json.dumps(chunk_existing, ensure_ascii=False)}\n"
-                            'Return {"entities":[{"text":"exact substring",'
-                            '"occurrence":1,"type":"allowed type"}]}.'
-                        ),
-                    },
-                ],
-                EntityRecoveryResponse,
-                max_new_tokens=RECOVERY_MAX_NEW_TOKENS,
-                reasoning_enabled=False,
-                call_id=f"{document.id}/recovery-{chunk.index:03d}",
-                checkpoint_dir=checkpoint_dir,
+            response = self._recover_chunk(
+                document,
+                chunk,
+                chunk_existing,
+                checkpoint_dir,
+                strict=False,
             )
-            return chunk, response
+            quality_error = self._recovery_quality_error(response)
+            if quality_error is None:
+                return chunk, response, None
+            retry = self._recover_chunk(
+                document,
+                chunk,
+                chunk_existing,
+                checkpoint_dir,
+                strict=True,
+            )
+            retry_error = self._recovery_quality_error(retry)
+            if retry_error is None:
+                return (
+                    chunk,
+                    retry,
+                    {
+                        "chunk_index": chunk.index,
+                        "status": "retried",
+                        "reason": "suspicious_recovery_response",
+                        "detail": quality_error,
+                        "initial_row_count": len(response.entities),
+                        "retry_row_count": len(retry.entities),
+                    },
+                )
+            return (
+                chunk,
+                EntityRecoveryResponse(entities=[]),
+                {
+                    "chunk_index": chunk.index,
+                    "status": "rejected",
+                    "reason": "suspicious_recovery_response",
+                    "detail": retry_error,
+                    "initial_row_count": len(response.entities),
+                    "retry_row_count": len(retry.entities),
+                },
+            )
 
-        for chunk, response in self._parallel_map(chunks, recovery_job):
+        for chunk, response, quality_audit in self._parallel_map(
+            chunks,
+            recovery_job,
+        ):
+            if quality_audit is not None:
+                audit.append(quality_audit)
+                if quality_audit["status"] == "retried":
+                    quality_retries += 1
+                else:
+                    quality_rejections += 1
             for row in response.entities:
                 type_value = row.type.strip()
                 try:
@@ -978,7 +1001,91 @@ class ClinicalPipeline:
                 "LLM recovery rejected "
                 f"{missing_substrings} row(s) not found exactly in their chunks"
             )
+        if quality_retries:
+            warnings.append(
+                "LLM recovery retried "
+                f"{quality_retries} suspicious chunk response(s)"
+            )
+        if quality_rejections:
+            warnings.append(
+                "LLM recovery discarded "
+                f"{quality_rejections} suspicious chunk response(s) after retry"
+            )
         return proposals, audit
+
+    def _recover_chunk(
+        self,
+        document: Document,
+        chunk: Chunk,
+        chunk_existing: list[dict[str, str]],
+        checkpoint_dir: Path | None,
+        *,
+        strict: bool,
+    ) -> EntityRecoveryResponse:
+        quality_policy = (
+            "The previous extraction was pathologically dense. Return at most "
+            "30 high-confidence missing entities. Never label ordinary words, "
+            "punctuation, anatomy alone, headings, durations, ages, percentages, "
+            "foods, activities, or treatment instructions as entities. A "
+            "single-word span is valid only when it is independently a clear "
+            "clinical symptom, diagnosis, medication, test name, or result."
+            if strict
+            else ""
+        )
+        return self.llm_backend.generate_json(
+            LLMTask.ENTITY_RECOVERY,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Exhaustively extract explicit clinical entities that "
+                        "are absent from EXISTING_ENTITIES. Copy text exactly. "
+                        "Never generate offsets or repeat an existing entity. "
+                        "Return JSON only. Allowed types are TRIỆU_CHỨNG, "
+                        "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC. "
+                        f"{quality_policy}"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"TEXT_CHUNK:\n<<<\n{chunk.text}\n>>>\n\n"
+                        "EXISTING_ENTITIES:\n"
+                        f"{json.dumps(chunk_existing, ensure_ascii=False)}\n"
+                        'Return {"entities":[{"text":"exact substring",'
+                        '"occurrence":1,"type":"allowed type"}]}.'
+                    ),
+                },
+            ],
+            EntityRecoveryResponse,
+            max_new_tokens=RECOVERY_MAX_NEW_TOKENS,
+            reasoning_enabled=False,
+            call_id=(
+                f"{document.id}/recovery-{chunk.index:03d}"
+                + ("-quality-fallback" if strict else "")
+            ),
+            checkpoint_dir=checkpoint_dir,
+        )
+
+    @staticmethod
+    def _recovery_quality_error(
+        response: EntityRecoveryResponse,
+    ) -> str | None:
+        rows = response.entities
+        if len(rows) > 40:
+            return f"row_count={len(rows)} exceeds 40"
+        if len(rows) < 20:
+            return None
+        single_token_rows = sum(
+            len(normalize_search(row.text).split()) <= 1 for row in rows
+        )
+        ratio = single_token_rows / len(rows)
+        if ratio > 0.65:
+            return (
+                f"single_token_ratio={ratio:.3f} exceeds 0.65 "
+                f"across {len(rows)} rows"
+            )
+        return None
 
     def _filter_merged_proposals(
         self,
