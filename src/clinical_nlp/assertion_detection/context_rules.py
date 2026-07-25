@@ -21,6 +21,11 @@ FAMILY_SUBJECT_RE = re.compile(
     r"(?:\s+(?:của\s+)?(?:bệnh\s+nhân|tôi|em|bạn|anh|chị))?"
     r"\s+(?:bị|mắc|có|được\s+chẩn\s+đoán)[^.!?;:\n]{0,100}$"
 )
+ASSERTION_CUE_RE = re.compile(
+    r"(?i)\b(?:không\s+(?:có|ghi\s+nhận)|phủ\s+nhận|"
+    r"chưa\s+(?:thấy|phát\s+hiện)|âm\s+tính|tiền\s+sử|"
+    r"trước\s+đây|đã\s+từng|family\s+history|history\s+of)\b"
+)
 CONTRAST_RE = re.compile(r"(?i)\b(?:nhưng|tuy\s+nhiên|however|but)\b")
 CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;\n]")
 
@@ -48,6 +53,17 @@ def _section_at(text: str, position: int) -> str | None:
 
 
 class AssertionDetector:
+    def has_context_cue(self, text: str, proposal: SpanProposal) -> bool:
+        prefix = text[max(0, proposal.start - 240) : proposal.start]
+        boundary = max(
+            [match.end() for match in CLAUSE_BOUNDARY_RE.finditer(prefix)]
+            + [prefix.rfind(",") + 1]
+        )
+        return bool(ASSERTION_CUE_RE.search(prefix[boundary:]))
+
+    def section_at(self, text: str, position: int) -> str | None:
+        return _section_at(text, position)
+
     def detect(self, text: str, proposal: SpanProposal) -> list[Assertion]:
         if proposal.type not in {
             EntityType.SYMPTOM,
@@ -85,4 +101,3 @@ class AssertionDetector:
 
         order = [Assertion.NEGATED, Assertion.FAMILY, Assertion.HISTORICAL]
         return [item for item in order if item in assertions]
-

@@ -23,6 +23,10 @@ def _overlaps(left: SpanProposal, right: SpanProposal) -> bool:
 
 
 def merge_proposals(proposals: list[SpanProposal]) -> list[SpanProposal]:
+    span_evidence: dict[tuple[int, int], list[SpanProposal]] = defaultdict(list)
+    for proposal in proposals:
+        span_evidence[(proposal.start, proposal.end)].append(proposal)
+
     grouped: dict[tuple[int, int, str], list[SpanProposal]] = defaultdict(list)
     for proposal in proposals:
         grouped[(proposal.start, proposal.end, proposal.type.value)].append(proposal)
@@ -37,8 +41,16 @@ def merge_proposals(proposals: list[SpanProposal]) -> list[SpanProposal]:
                 row.end - row.start,
             ),
         )
+        same_span = span_evidence[(winner.start, winner.end)]
         evidence = dict(winner.evidence)
         evidence["sources"] = sorted({row.source for row in rows})
+        evidence["supporting_sources"] = sorted(
+            {row.source for row in same_span}
+        )
+        evidence["alternative_types"] = sorted(
+            {row.type.value for row in same_span}
+        )
+        evidence["type_conflict"] = len(evidence["alternative_types"]) > 1
         combined.append(winner.model_copy(update={"evidence": evidence}))
 
     ordered = sorted(
@@ -56,4 +68,3 @@ def merge_proposals(proposals: list[SpanProposal]) -> list[SpanProposal]:
             continue
         selected.append(proposal)
     return sorted(selected, key=lambda row: (row.start, row.end))
-

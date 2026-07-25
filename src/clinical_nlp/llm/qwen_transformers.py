@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -40,14 +41,22 @@ class QwenTransformersBackend:
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
         max_new_tokens: int | None = None,
+        reasoning_enabled: bool | None = None,
+        call_id: str | None = None,
+        checkpoint_dir: Path | None = None,
     ) -> BaseModel:
+        del call_id, checkpoint_dir
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            enable_thinking=self.config.thinking,
+            enable_thinking=(
+                reasoning_enabled
+                if reasoning_enabled is not None
+                else self.config.thinking
+            ),
         ).to(self.model.device)
         last_error: json.JSONDecodeError | ValidationError | None = None
         for _ in range(self.config.max_retries + 1):

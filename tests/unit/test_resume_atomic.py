@@ -21,7 +21,7 @@ class FakePipeline:
             "llm": {"backend": "fake", "model_id": "fake-llm"},
         }
 
-    def process(self, document: Document):
+    def process(self, document: Document, *, checkpoint_dir=None):
         self.calls += 1
         entity = Entity(
             text=document.text,

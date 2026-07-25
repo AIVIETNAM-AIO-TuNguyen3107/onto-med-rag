@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel
@@ -25,6 +26,9 @@ class LLMBackend(Protocol):
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
         max_new_tokens: int | None = None,
+        reasoning_enabled: bool | None = None,
+        call_id: str | None = None,
+        checkpoint_dir: Path | None = None,
     ) -> BaseModel: ...
 
 
@@ -37,11 +41,19 @@ class NoopLLMBackend:
         messages: list[dict[str, Any]],
         response_schema: type[BaseModel],
         max_new_tokens: int | None = None,
+        reasoning_enabled: bool | None = None,
+        call_id: str | None = None,
+        checkpoint_dir: Path | None = None,
     ) -> BaseModel:
+        del reasoning_enabled, call_id, checkpoint_dir
         raise RuntimeError("LLM backend is unavailable")
 
 
-def create_llm_backend(config: ModelConfig) -> LLMBackend:
+def create_llm_backend(
+    config: ModelConfig,
+    *,
+    cache_path: Path | None = None,
+) -> LLMBackend:
     if config.backend == "noop":
         return NoopLLMBackend()
     if config.backend == "qwen_transformers":
@@ -51,5 +63,5 @@ def create_llm_backend(config: ModelConfig) -> LLMBackend:
     if config.backend == "openai_compatible":
         from .openai_compatible import OpenAICompatibleBackend
 
-        return OpenAICompatibleBackend(config)
+        return OpenAICompatibleBackend(config, cache_path=cache_path)
     raise ValueError(f"unsupported LLM backend: {config.backend}")

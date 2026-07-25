@@ -46,12 +46,18 @@ def _build_pipeline(config_path: str) -> tuple[ClinicalPipeline, object]:
         config.ner.backend = "noop"
         ner = create_ner_backend(config.ner)
     try:
-        llm = create_llm_backend(config.llm)
+        llm = create_llm_backend(
+            config.llm,
+            cache_path=config.paths.llm_cache,
+        )
     except Exception:
         if config.run.fail_on_model_unavailable:
             raise
         config.llm.backend = "noop"
-        llm = create_llm_backend(config.llm)
+        llm = create_llm_backend(
+            config.llm,
+            cache_path=config.paths.llm_cache,
+        )
     return ClinicalPipeline(config, index, rxnorm, ner, llm), config
 
 

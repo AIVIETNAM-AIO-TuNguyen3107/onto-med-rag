@@ -23,6 +23,7 @@ DOCUMENT_ARTIFACT_NAMES = (
     "llm_recovery_audit.json",
     "merged_entities.json",
     "llm_reviews.json",
+    "llm_calls.json",
     "assertions.json",
     "icd_candidates.json",
     "rxnorm_candidates.json",
@@ -202,8 +203,11 @@ class RunSupervisor:
             text=source.read_text("utf-8"),
             source_path=str(source),
         )
-        entities, artifacts = self.pipeline.process(document)
         doc_dir = self.run_dir / "documents" / document_id
+        entities, artifacts = self.pipeline.process(
+            document,
+            checkpoint_dir=doc_dir / "checkpoints",
+        )
         self._write_artifacts(doc_dir, artifacts)
         write_entities(
             self.run_dir / "outputs" / f"{document_id}.json",
@@ -211,6 +215,7 @@ class RunSupervisor:
             entities,
             pretty=self.config.run.pretty_json,
         )
+        llm_metrics = _llm_metrics(artifacts.llm_calls)
         validation = {
             "document_id": document_id,
             "status": "ok",
@@ -225,6 +230,7 @@ class RunSupervisor:
                 "merged_entities": len(artifacts.merged_entities),
                 "reranked_entities": len(artifacts.reranked_entities),
             },
+            "llm": llm_metrics,
             "resumed": False,
             "type_counts": dict(Counter(entity.type.value for entity in entities)),
             "assertion_counts": dict(
@@ -236,7 +242,8 @@ class RunSupervisor:
             ),
             "linked_entities": sum(bool(entity.candidates) for entity in entities),
             "empty_candidate_entities": sum(
-                entity.type.value in {"BỆNH_LÝ", "THUỐC"} and not entity.candidates
+                entity.type.value in {"CHẨN_ĐOÁN", "THUỐC"}
+                and not entity.candidates
                 for entity in entities
             ),
         }
@@ -296,6 +303,7 @@ class RunSupervisor:
                 "documents": len(results),
                 "entities": sum(row["entity_count"] for row in results),
                 "warnings": sum(row["warning_count"] for row in results),
+                "llm": _aggregate_llm_metrics(results),
             },
         )
         type_counts: Counter[str] = Counter()
@@ -314,6 +322,7 @@ class RunSupervisor:
                 "empty_candidate_entities": sum(
                     row["empty_candidate_entities"] for row in results
                 ),
+                "llm": _aggregate_llm_metrics(results),
                 "per_document": [
                     {
                         "document_id": row["document_id"],
@@ -325,6 +334,7 @@ class RunSupervisor:
                             "empty_candidate_entities"
                         ],
                         "warnings": row["warning_count"],
+                        "llm": row["llm"],
                     }
                     for row in results
                 ],
@@ -378,6 +388,7 @@ class RunSupervisor:
                     "documents": len(results),
                     "entities": sum(row["entity_count"] for row in results),
                     "warnings": sum(row["warning_count"] for row in results),
+                    "llm": _aggregate_llm_metrics(results),
                 },
             },
         )
@@ -421,6 +432,7 @@ class RunSupervisor:
             "assertion_counts",
             "linked_entities",
             "empty_candidate_entities",
+            "llm",
         }
         if not isinstance(validation, dict) or not required_keys <= validation.keys():
             raise ValueError(
@@ -446,6 +458,7 @@ class RunSupervisor:
             "llm_recovery_audit.json": artifacts.llm_recovery_audit,
             "merged_entities.json": artifacts.merged_entities,
             "llm_reviews.json": artifacts.llm_reviews,
+            "llm_calls.json": artifacts.llm_calls,
             "assertions.json": artifacts.assertions,
             "icd_candidates.json": artifacts.icd_candidates,
             "rxnorm_candidates.json": artifacts.rxnorm_candidates,
@@ -455,6 +468,53 @@ class RunSupervisor:
         }
         for name, payload in mapping.items():
             _write_json(doc_dir / name, payload)
+
+
+def _llm_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    usage_keys = (
+        "prompt_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+    )
+    result: dict[str, Any] = {
+        "logical_calls": len(rows),
+        "api_calls": sum(row.get("source") == "api" for row in rows),
+        "http_attempts": sum(int(row.get("attempts") or 0) for row in rows),
+        "reasoning_calls": sum(
+            row.get("source") == "api" and bool(row.get("reasoning_requested"))
+            for row in rows
+        ),
+        "cache_hits": sum(row.get("source") == "cache" for row in rows),
+        "checkpoint_hits": sum(
+            row.get("source") == "checkpoint" for row in rows
+        ),
+        "latency_seconds": sum(
+            float(row.get("elapsed_seconds") or 0.0) for row in rows
+        ),
+        "cost": sum(
+            float((row.get("usage") or {}).get("cost") or 0.0)
+            for row in rows
+        ),
+    }
+    for key in usage_keys:
+        result[key] = sum(
+            int((row.get("usage") or {}).get(key) or 0)
+            for row in rows
+        )
+    return result
+
+
+def _aggregate_llm_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    keys = {
+        key
+        for row in results
+        for key in row.get("llm", {})
+    }
+    return {
+        key: sum(row.get("llm", {}).get(key, 0) for row in results)
+        for key in sorted(keys)
+    }
 
 
 def _resume_manifest_signature(manifest: dict[str, Any]) -> dict[str, Any]:

@@ -39,12 +39,14 @@ class FakeLLM:
         messages,
         response_schema,
         max_new_tokens=None,
+        **kwargs,
     ):
         self.calls.append(
             {
                 "task": task,
                 "messages": messages,
                 "max_new_tokens": max_new_tokens,
+                **kwargs,
             }
         )
         if len(self.responses) > 1:
@@ -111,7 +113,7 @@ def test_entity_review_rejects_assertions_on_lab_results(tmp_path: Path) -> None
         source="test",
     )
 
-    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+    with pytest.raises(RuntimeError, match="invalid"):
         pipeline._review_entities(document, [proposal], {(0, 2): []})
 
 
@@ -150,7 +152,7 @@ def test_batch_rerank_cannot_invent_candidate_ids(tmp_path: Path) -> None:
         )
 
 
-def test_entity_review_is_batched_at_twenty(tmp_path: Path) -> None:
+def test_entity_review_is_batched_at_ten(tmp_path: Path) -> None:
     proposals = [
         SpanProposal(
             start=index * 2,
@@ -169,7 +171,17 @@ def test_entity_review_is_batched_at_twenty(tmp_path: Path) -> None:
                     keep=True,
                     type=row.type,
                 )
-                for row in proposals[:20]
+                for row in proposals[:10]
+            ]
+        ),
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(row.start, row.end),
+                    keep=True,
+                    type=row.type,
+                )
+                for row in proposals[10:20]
             ]
         ),
         EntityReviewResponse(
@@ -183,6 +195,7 @@ def test_entity_review_is_batched_at_twenty(tmp_path: Path) -> None:
         ),
     ]
     pipeline = _pipeline(tmp_path, responses)
+    pipeline.config.llm.max_concurrency = 1
 
     pipeline._review_entities(
         Document(id="x", text="x " * 21),
@@ -190,7 +203,7 @@ def test_entity_review_is_batched_at_twenty(tmp_path: Path) -> None:
         {(row.start, row.end): [] for row in proposals},
     )
 
-    assert len(pipeline.llm_backend.calls) == 2
+    assert len(pipeline.llm_backend.calls) == 3
     assert {
         row["max_new_tokens"] for row in pipeline.llm_backend.calls
     } == {2048}
@@ -236,7 +249,7 @@ def test_recovery_audits_unknown_types_and_uses_chunk_budget(
     assert pipeline.llm_backend.calls[0]["max_new_tokens"] == 1536
 
 
-def test_incomplete_review_retries_twice_then_fails(tmp_path: Path) -> None:
+def test_incomplete_review_retries_once_then_fails(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path, EntityReviewResponse(entities=[]))
     proposal = SpanProposal(
         start=0,
@@ -246,14 +259,14 @@ def test_incomplete_review_retries_twice_then_fails(tmp_path: Path) -> None:
         source="test",
     )
 
-    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+    with pytest.raises(RuntimeError, match="invalid"):
         pipeline._review_entities(
             Document(id="x", text="ho"),
             [proposal],
             {(0, 2): []},
         )
 
-    assert len(pipeline.llm_backend.calls) == 3
+    assert len(pipeline.llm_backend.calls) == 2
 
 
 def test_terminology_reranking_is_batched_at_ten(tmp_path: Path) -> None:
@@ -300,6 +313,7 @@ def test_terminology_reranking_is_batched_at_ten(tmp_path: Path) -> None:
         ),
     ]
     pipeline = _pipeline(tmp_path, responses)
+    pipeline.config.llm.max_concurrency = 1
 
     selected = pipeline._batch_rerank(
         task="icd_rerank",

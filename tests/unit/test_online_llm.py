@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import requests
@@ -203,3 +204,127 @@ def test_reasoning_effort_payload_can_be_disabled(
     )
 
     assert "reasoning_effort" not in session.calls[0]["json"]
+
+
+def test_length_response_falls_back_once_without_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    first = _body("", reasoning="private chain")
+    first["choices"][0]["finish_reason"] = "length"
+    session = FakeSession(
+        [
+            FakeResponse(200, first),
+            FakeResponse(200, _body('{"status":"ok"}')),
+        ]
+    )
+    config = _config().model_copy(
+        update={
+            "reasoning_enabled": True,
+            "structured_outputs": True,
+            "decision_retries": 1,
+        }
+    )
+    backend = OpenAICompatibleBackend(config, session=session)
+
+    result = backend.generate_json(
+        LLMTask.ENTITY_RECOVERY,
+        [{"role": "user", "content": "test"}],
+        SmokeResponse,
+        max_new_tokens=1536,
+        call_id="1/recovery-000",
+    )
+
+    assert result.status == "ok"
+    assert len(session.calls) == 2
+    assert session.calls[0]["json"]["response_format"]["type"] == "json_schema"
+    assert session.calls[1]["json"]["reasoning"]["enabled"] is False
+    assert session.calls[1]["json"]["max_tokens"] == 2048
+    audit = backend.call_audits()[0]
+    assert audit["attempts"] == 2
+    assert audit["reasoning_fallback"] is True
+
+
+def test_validated_response_cache_and_checkpoint_store_no_raw_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    cache_path = tmp_path / "llm.sqlite3"
+    checkpoint_dir = tmp_path / "checkpoints"
+    secret_reasoning = "never persist this private reasoning"
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                _body('{"status":"ok"}', reasoning=secret_reasoning),
+            )
+        ]
+    )
+    backend = OpenAICompatibleBackend(
+        _config(),
+        session=session,
+        cache_path=cache_path,
+    )
+    kwargs = {
+        "task": LLMTask.ENTITY_RECOVERY,
+        "messages": [{"role": "user", "content": "cache me"}],
+        "response_schema": SmokeResponse,
+        "max_new_tokens": 128,
+        "reasoning_enabled": False,
+        "call_id": "1/recovery-000",
+        "checkpoint_dir": checkpoint_dir,
+    }
+
+    assert backend.generate_json(**kwargs).status == "ok"
+    assert backend.generate_json(**kwargs).status == "ok"
+    assert len(session.calls) == 1
+    assert [row["source"] for row in backend.call_audits()] == [
+        "api",
+        "checkpoint",
+    ]
+
+    empty_session = FakeSession([])
+    cached_backend = OpenAICompatibleBackend(
+        _config(),
+        session=empty_session,
+        cache_path=cache_path,
+    )
+    cached_kwargs = dict(kwargs)
+    cached_kwargs["checkpoint_dir"] = tmp_path / "other-checkpoints"
+    assert cached_backend.generate_json(**cached_kwargs).status == "ok"
+    assert empty_session.calls == []
+    assert cached_backend.call_audits()[0]["source"] == "cache"
+
+    stored_text = "\n".join(
+        path.read_text("utf-8")
+        for path in tmp_path.rglob("*.json")
+    )
+    assert secret_reasoning not in stored_text
+    assert "test-token" not in stored_text
+
+
+def test_failed_non_retryable_call_is_safely_audited(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    backend = OpenAICompatibleBackend(
+        _config(),
+        session=FakeSession([FakeResponse(401, {"raw": "do-not-store"})]),
+    )
+
+    with pytest.raises(RuntimeError, match="status 401"):
+        backend.generate_json(
+            LLMTask.ENTITY_RECOVERY,
+            [{"role": "user", "content": "test"}],
+            SmokeResponse,
+            call_id="1/recovery-000",
+            checkpoint_dir=tmp_path,
+        )
+
+    audit = backend.call_audits()[0]
+    assert audit["status"] == "failed"
+    serialized = json.dumps(audit)
+    assert "do-not-store" not in serialized
+    assert "test-token" not in serialized

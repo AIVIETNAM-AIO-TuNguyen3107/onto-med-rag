@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,6 +15,7 @@ from clinical_nlp.entity_finding import RuleEntityFinder, merge_proposals
 from clinical_nlp.icd_linking import ICDIndex
 from clinical_nlp.llm.base import LLMBackend, LLMTask, NoopLLMBackend
 from clinical_nlp.ner.base import NERBackend
+from clinical_nlp.normalization import normalize_search
 from clinical_nlp.rxnorm_linking import RxNormIndex
 from clinical_nlp.rxnorm_linking.index import query_variants
 from clinical_nlp.schemas import (
@@ -27,10 +32,26 @@ from clinical_nlp.validation import validate_entities
 
 
 RECOVERY_MAX_NEW_TOKENS = 1536
+PREFLIGHT_MAX_NEW_TOKENS = 512
 REVIEW_MAX_NEW_TOKENS = 2048
 RERANK_MAX_NEW_TOKENS = 1536
-ENTITY_REVIEW_BATCH_SIZE = 20
+FALLBACK_MAX_NEW_TOKENS = 2048
+ENTITY_REVIEW_BATCH_SIZE = 10
 TERMINOLOGY_RERANK_BATCH_SIZE = 10
+POST_MERGE_NON_MEDICATIONS = {
+    "băng phiến",
+    "long não",
+    "thuốc",
+    "thuốc nam",
+    "thuốc đông y",
+}
+QUALITATIVE_RESULT_RE = re.compile(r"(?i)^(?:âm\s+tính|dương\s+tính)$")
+NUMERIC_RESULT_RE = re.compile(
+    r"(?ix)^[<>]=?\s*[+-]?\d+(?:[.,]\d+)?"
+    r"(?:\s*[-–]\s*[+-]?\d+(?:[.,]\d+)?)?"
+    r"(?:\s*(?:%|g/L|mg/L|mmol/L|µmol/L|umol/L|U/L|IU/L|"
+    r"10\^?\d+/L|x10\^?\d+/L|mmHg|bpm))?$"
+)
 
 
 class RecoveredEntity(BaseModel):
@@ -84,6 +105,7 @@ class DocumentArtifacts(BaseModel):
     llm_recovery_audit: list[dict[str, Any]]
     merged_entities: list[dict[str, Any]]
     llm_reviews: list[dict[str, Any]]
+    llm_calls: list[dict[str, Any]] = Field(default_factory=list)
     assertions: list[dict[str, Any]]
     icd_candidates: list[dict[str, Any]]
     rxnorm_candidates: list[dict[str, Any]]
@@ -108,8 +130,18 @@ class ClinicalPipeline:
         self.llm_backend = llm_backend
         self.rules = RuleEntityFinder(icd_index=icd_index)
         self.assertions = AssertionDetector()
+        self._retrieval_lock = threading.Lock()
+        self._retrieval_cache: dict[
+            tuple[str, str],
+            list[LinkCandidate],
+        ] = {}
 
-    def process(self, document: Document) -> tuple[list[Entity], DocumentArtifacts]:
+    def process(
+        self,
+        document: Document,
+        *,
+        checkpoint_dir: Path | None = None,
+    ) -> tuple[list[Entity], DocumentArtifacts]:
         warnings: list[str] = []
         chunks = chunk_document(
             document,
@@ -139,6 +171,7 @@ class ClinicalPipeline:
                     chunks,
                     rule_proposals + ner_proposals,
                     warnings,
+                    checkpoint_dir,
                 )
             except Exception as exc:
                 if self.config.run.fail_on_model_unavailable:
@@ -146,6 +179,7 @@ class ClinicalPipeline:
                 warnings.append(f"LLM recovery unavailable: {type(exc).__name__}: {exc}")
 
         merged = merge_proposals(rule_proposals + ner_proposals + llm_proposals)
+        merged, filter_decisions = self._filter_merged_proposals(merged)
         assertion_by_position: dict[tuple[int, int], list[str]] = {}
         for proposal in merged:
             labels = self.assertions.detect(document.text, proposal)
@@ -153,12 +187,26 @@ class ClinicalPipeline:
                 value.value for value in labels
             ]
 
-        llm_reviews: list[dict[str, Any]] = []
-        if self.config.run.llm_full_review:
+        llm_reviews: list[dict[str, Any]] = list(filter_decisions)
+        review_mode = self.config.run.llm_review_mode or "off"
+        if review_mode != "off":
             merged, assertion_by_position, llm_reviews = self._review_entities(
                 document,
                 merged,
                 assertion_by_position,
+                warnings,
+                checkpoint_dir,
+                review_mode,
+                prefix_artifacts=filter_decisions,
+            )
+        else:
+            llm_reviews.extend(
+                self._automatic_review_artifact(
+                    proposal,
+                    assertion_by_position[(proposal.start, proposal.end)],
+                    reason="review_mode_off",
+                )
+                for proposal in merged
             )
 
         icd_artifacts: list[dict[str, Any]] = []
@@ -167,27 +215,44 @@ class ClinicalPipeline:
         rxnorm_entries: list[tuple[SpanProposal, list[LinkCandidate]]] = []
         for proposal in merged:
             if proposal.type == EntityType.DIAGNOSIS:
-                candidates = self.icd_index.retrieve(
-                    proposal.text,
-                    limit=self.config.linking.retrieval_candidates,
-                )
+                candidates = self._retrieve_icd(proposal.text)
                 icd_entries.append((proposal, candidates))
             elif proposal.type == EntityType.MEDICATION:
                 candidates = self._retrieve_rxnorm(proposal.text, warnings)
                 rxnorm_entries.append((proposal, candidates))
 
-        if self.config.run.llm_full_review:
+        terminology_decisions: dict[tuple[int, int], dict[str, Any]] = {}
+        if review_mode == "selective":
+            selected_icd, icd_decisions = self._select_terminology(
+                LLMTask.ICD_RERANK,
+                document,
+                icd_entries,
+                self.config.linking.icd_max_candidates,
+                checkpoint_dir,
+            )
+            selected_rxnorm, rxnorm_decisions = self._select_terminology(
+                LLMTask.RXNORM_RERANK,
+                document,
+                rxnorm_entries,
+                self.config.linking.rxnorm_max_candidates,
+                checkpoint_dir,
+            )
+            terminology_decisions.update(icd_decisions)
+            terminology_decisions.update(rxnorm_decisions)
+        elif review_mode == "full":
             selected_icd = self._batch_rerank(
                 LLMTask.ICD_RERANK,
                 document,
                 icd_entries,
                 self.config.linking.icd_max_candidates,
+                checkpoint_dir,
             )
             selected_rxnorm = self._batch_rerank(
                 LLMTask.RXNORM_RERANK,
                 document,
                 rxnorm_entries,
                 self.config.linking.rxnorm_max_candidates,
+                checkpoint_dir,
             )
         else:
             selected_icd = {
@@ -214,12 +279,24 @@ class ClinicalPipeline:
         for proposal, candidates in icd_entries:
             selected = selected_icd[(proposal.start, proposal.end)]
             icd_artifacts.append(
-                self._candidate_artifact(proposal, candidates, selected)
+                self._candidate_artifact(
+                    proposal,
+                    candidates,
+                    self._eligible_candidates(LLMTask.ICD_RERANK, candidates),
+                    selected,
+                    terminology_decisions.get((proposal.start, proposal.end)),
+                )
             )
         for proposal, candidates in rxnorm_entries:
             selected = selected_rxnorm[(proposal.start, proposal.end)]
             rxnorm_artifacts.append(
-                self._candidate_artifact(proposal, candidates, selected)
+                self._candidate_artifact(
+                    proposal,
+                    candidates,
+                    self._eligible_candidates(LLMTask.RXNORM_RERANK, candidates),
+                    selected,
+                    terminology_decisions.get((proposal.start, proposal.end)),
+                )
             )
 
         entities: list[Entity] = []
@@ -261,6 +338,7 @@ class ClinicalPipeline:
             llm_recovery_audit=llm_recovery_audit,
             merged_entities=[row.model_dump(mode="json") for row in merged],
             llm_reviews=llm_reviews,
+            llm_calls=self._document_call_audits(document.id),
             assertions=assertion_rows,
             icd_candidates=icd_artifacts,
             rxnorm_candidates=rxnorm_artifacts,
@@ -281,6 +359,12 @@ class ClinicalPipeline:
                 "model_id": self.config.llm.model_id,
                 "endpoint": self.config.llm.endpoint,
                 "thinking": self.config.llm.thinking,
+                "review_mode": self.config.run.llm_review_mode,
+                "task_reasoning": {
+                    "entity_recovery": False,
+                    "entity_review": self.config.llm.reasoning_enabled,
+                    "terminology_rerank": self.config.llm.reasoning_enabled,
+                },
                 "last_response": getattr(
                     self.llm_backend,
                     "last_response_metadata",
@@ -307,7 +391,9 @@ class ClinicalPipeline:
                 },
             ],
             OnlinePreflightResponse,
-            max_new_tokens=128,
+            max_new_tokens=PREFLIGHT_MAX_NEW_TOKENS,
+            reasoning_enabled=False,
+            call_id="preflight/model-json",
         )
         if response.status != "ok" or response.sum != 4:
             raise RuntimeError("LLM preflight returned an unexpected response")
@@ -339,111 +425,85 @@ class ClinicalPipeline:
         document: Document,
         proposals: list[SpanProposal],
         initial_assertions: dict[tuple[int, int], list[str]],
+        warnings: list[str] | None = None,
+        checkpoint_dir: Path | None = None,
+        review_mode: str = "full",
+        *,
+        prefix_artifacts: list[dict[str, Any]] | None = None,
     ) -> tuple[
         list[SpanProposal],
         dict[tuple[int, int], list[str]],
         list[dict[str, Any]],
     ]:
+        warnings = warnings if warnings is not None else []
         if isinstance(self.llm_backend, NoopLLMBackend):
-            raise RuntimeError("full LLM review requires an active LLM backend")
+            raise RuntimeError("LLM review requires an active LLM backend")
+        review_reasons: dict[tuple[int, int], list[str]] = {}
+        review_proposals: list[SpanProposal] = []
+        for proposal in proposals:
+            position = (proposal.start, proposal.end)
+            reasons = (
+                ["full_review"]
+                if review_mode == "full"
+                else self._selective_review_reasons(
+                    document,
+                    proposal,
+                    initial_assertions[position],
+                    warnings,
+                )
+            )
+            review_reasons[position] = reasons
+            if reasons:
+                review_proposals.append(proposal)
+
         decisions: dict[tuple[int, int], ReviewedEntity] = {}
         batch_by_position: dict[tuple[int, int], int] = {}
-        for batch_index, start in enumerate(
-            range(0, len(proposals), ENTITY_REVIEW_BATCH_SIZE)
-        ):
-            batch = proposals[start : start + ENTITY_REVIEW_BATCH_SIZE]
-            supplied = [
-                {
-                    "position": [row.start, row.end],
-                    "text": row.text,
-                    "type": row.type.value,
-                    "assertions": initial_assertions[(row.start, row.end)],
-                }
-                for row in batch
-            ]
-            expected = {(row.start, row.end) for row in batch}
-            last_error: ValueError | None = None
-            for _ in range(self.config.llm.max_retries + 1):
-                response = self.llm_backend.generate_json(
-                    LLMTask.ASSERTION_ADJUDICATION,
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Review supplied Vietnamese clinical entity spans. "
-                                "Think carefully, then return JSON only. Positions "
-                                "are immutable. Return exactly one decision for every "
-                                "supplied position. Set keep=false for generic or "
-                                "non-clinical false positives. Use only the five "
-                                "allowed entity types. Assertions may only be "
-                                "isNegated, isFamily, isHistorical and are permitted "
-                                "only for symptoms, diagnoses, and medications. "
-                                "Family assertions require contextual evidence, not "
-                                "merely a kinship word."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
-                                "ENTITIES:\n"
-                                f"{json.dumps(supplied, ensure_ascii=False)}\n\n"
-                                'Return {"entities":[{"position":[start,end],'
-                                '"keep":true,"type":"ALLOWED_TYPE",'
-                                '"assertions":[]}]}.'
-                            ),
-                        },
-                    ],
-                    EntityReviewResponse,
-                    max_new_tokens=REVIEW_MAX_NEW_TOKENS,
+        batches = [
+            review_proposals[start : start + ENTITY_REVIEW_BATCH_SIZE]
+            for start in range(0, len(review_proposals), ENTITY_REVIEW_BATCH_SIZE)
+        ]
+        jobs = list(enumerate(batches))
+
+        def review_job(
+            job: tuple[int, list[SpanProposal]],
+        ) -> tuple[int, list[ReviewedEntity]]:
+            batch_index, batch = job
+            response = self._review_batch(
+                document,
+                batch,
+                initial_assertions,
+                batch_index,
+                checkpoint_dir,
+                reasoning_enabled=True,
+                call_suffix="",
+            )
+            error = self._review_response_error(batch, response)
+            if error is not None and self.config.llm.decision_retries:
+                response = self._review_batch(
+                    document,
+                    batch,
+                    initial_assertions,
+                    batch_index,
+                    checkpoint_dir,
+                    reasoning_enabled=False,
+                    call_suffix="-decision-fallback",
                 )
-                returned = [tuple(row.position) for row in response.entities]
-                returned_set = set(returned)
-                invented = returned_set - expected
-                if invented:
-                    raise ValueError(
-                        "LLM entity review invented or changed positions: "
-                        f"{sorted(invented)}"
-                    )
-                if len(returned) != len(returned_set):
-                    last_error = ValueError(
-                        "LLM entity review returned duplicate positions"
-                    )
-                    continue
-                if returned_set != expected:
-                    last_error = ValueError(
-                        "LLM entity review omitted required positions"
-                    )
-                    continue
-                invalid_assertion = any(
-                    row.type
-                    not in {
-                        EntityType.SYMPTOM,
-                        EntityType.DIAGNOSIS,
-                        EntityType.MEDICATION,
-                    }
-                    and row.assertions
-                    for row in response.entities
-                )
-                if invalid_assertion:
-                    last_error = ValueError(
-                        "LLM assigned assertions to an ineligible entity type"
-                    )
-                    continue
-                for row in response.entities:
-                    position = tuple(row.position)
-                    decisions[position] = row
-                    batch_by_position[position] = batch_index
-                break
-            else:
+                error = self._review_response_error(batch, response)
+            if error is not None:
                 raise RuntimeError(
-                    "LLM entity review remained incomplete or invalid after "
-                    f"{self.config.llm.max_retries + 1} attempts"
-                ) from last_error
+                    f"LLM entity review batch {batch_index} invalid: {error}"
+                )
+            return batch_index, response.entities
+
+        for batch_index, rows in self._parallel_map(jobs, review_job):
+            for row in rows:
+                position = tuple(row.position)
+                decisions[position] = row
+                batch_by_position[position] = batch_index
 
         reviewed: list[SpanProposal] = []
         reviewed_assertions: dict[tuple[int, int], list[str]] = {}
-        artifacts: list[dict[str, Any]] = []
+        artifacts: list[dict[str, Any]] = list(prefix_artifacts or [])
         eligible = {
             EntityType.SYMPTOM,
             EntityType.DIAGNOSIS,
@@ -451,7 +511,18 @@ class ClinicalPipeline:
         }
         for proposal in proposals:
             position = (proposal.start, proposal.end)
-            decision = decisions[position]
+            decision = decisions.get(position)
+            if decision is None:
+                reviewed.append(proposal)
+                reviewed_assertions[position] = initial_assertions[position]
+                artifacts.append(
+                    self._automatic_review_artifact(
+                        proposal,
+                        initial_assertions[position],
+                        reason="high_confidence",
+                    )
+                )
+                continue
             if decision.type not in eligible and decision.assertions:
                 raise ValueError("LLM assigned assertions to an ineligible entity type")
             artifacts.append(
@@ -466,6 +537,8 @@ class ClinicalPipeline:
                         value.value for value in decision.assertions
                     ],
                     "batch_index": batch_by_position[position],
+                    "decision_source": "llm",
+                    "escalation_reasons": review_reasons[position],
                 }
             )
             if not decision.keep:
@@ -485,13 +558,107 @@ class ClinicalPipeline:
             ]
         return reviewed, reviewed_assertions, artifacts
 
+    def _review_batch(
+        self,
+        document: Document,
+        batch: list[SpanProposal],
+        initial_assertions: dict[tuple[int, int], list[str]],
+        batch_index: int,
+        checkpoint_dir: Path | None,
+        *,
+        reasoning_enabled: bool,
+        call_suffix: str,
+    ) -> EntityReviewResponse:
+        supplied = [
+            {
+                "position": [row.start, row.end],
+                "text": row.text,
+                "type": row.type.value,
+                "assertions": initial_assertions[(row.start, row.end)],
+                "section": self.assertions.section_at(document.text, row.start),
+                **self._local_context(document, row.start, row.end),
+            }
+            for row in batch
+        ]
+        return self.llm_backend.generate_json(
+            LLMTask.ASSERTION_ADJUDICATION,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Review supplied Vietnamese clinical entity spans. "
+                        "Think carefully, then return JSON only. Positions are "
+                        "immutable. Return exactly one decision for every supplied "
+                        "position. Set keep=false for generic or non-clinical false "
+                        "positives. Use only the five allowed entity types. "
+                        "Assertions may only be isNegated, isFamily, isHistorical "
+                        "and are permitted only for symptoms, diagnoses, and "
+                        "medications. Family assertions require contextual evidence, "
+                        "not merely a kinship word."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "ENTITIES_WITH_LOCAL_CONTEXT:\n"
+                        f"{json.dumps(supplied, ensure_ascii=False)}\n\n"
+                        'Return {"entities":[{"position":[start,end],'
+                        '"keep":true,"type":"ALLOWED_TYPE","assertions":[]}]}.'
+                    ),
+                },
+            ],
+            EntityReviewResponse,
+            max_new_tokens=(
+                REVIEW_MAX_NEW_TOKENS
+                if reasoning_enabled
+                else FALLBACK_MAX_NEW_TOKENS
+            ),
+            reasoning_enabled=reasoning_enabled,
+            call_id=(
+                f"{document.id}/review-{batch_index:03d}{call_suffix}"
+            ),
+            checkpoint_dir=checkpoint_dir,
+        )
+
+    @staticmethod
+    def _review_response_error(
+        batch: list[SpanProposal],
+        response: EntityReviewResponse,
+    ) -> str | None:
+        expected = {(row.start, row.end) for row in batch}
+        returned = [tuple(row.position) for row in response.entities]
+        returned_set = set(returned)
+        invented = returned_set - expected
+        if invented:
+            raise ValueError(
+                "LLM entity review invented or changed positions: "
+                f"{sorted(invented)}"
+            )
+        if len(returned) != len(returned_set):
+            return "duplicate positions"
+        if returned_set != expected:
+            return "omitted required positions"
+        assertion_eligible = {
+            EntityType.SYMPTOM,
+            EntityType.DIAGNOSIS,
+            EntityType.MEDICATION,
+        }
+        if any(
+            row.type not in assertion_eligible and row.assertions
+            for row in response.entities
+        ):
+            return "assertions assigned to an ineligible entity type"
+        return None
+
     def _batch_rerank(
         self,
         task: LLMTask,
         document: Document,
         entries: list[tuple[SpanProposal, list[LinkCandidate]]],
         limit: int,
+        checkpoint_dir: Path | None = None,
     ) -> dict[tuple[int, int], list[LinkCandidate]]:
+        task = LLMTask(task)
         selected: dict[tuple[int, int], list[LinkCandidate]] = {
             (proposal.start, proposal.end): []
             for proposal, _ in entries
@@ -506,122 +673,176 @@ class ClinicalPipeline:
         if isinstance(self.llm_backend, NoopLLMBackend):
             raise RuntimeError("batch terminology reranking requires an active LLM")
 
-        policy = (
-            "For ICD-10, choose the most specific code explicitly supported by "
-            "the mention and document. Hierarchy/status Z codes are valid only "
-            "when the text expresses that factor rather than a disease."
-            if task == LLMTask.ICD_RERANK
-            else
-            "For RxNorm, prefer generic SCD when ingredient, strength, and form "
-            "are supported; choose SBD only for an explicit brand; use IN when "
-            "the text supports only the ingredient. Never assume missing details."
-        )
         candidates_by_position = {
             (proposal.start, proposal.end): {
                 row.identifier: row for row in candidates
             }
             for proposal, candidates in with_candidates
         }
-        for start in range(0, len(with_candidates), TERMINOLOGY_RERANK_BATCH_SIZE):
-            batch = with_candidates[start : start + TERMINOLOGY_RERANK_BATCH_SIZE]
-            payload = [
-                {
-                    "position": [proposal.start, proposal.end],
-                    "mention": proposal.text,
-                    "candidates": [
-                        {
-                            "id": row.identifier,
-                            "name": row.name,
-                            "type": row.terminology_type,
-                            "score": row.score,
-                            "metadata": row.metadata,
-                        }
-                        for row in candidates
-                    ],
-                }
-                for proposal, candidates in batch
-            ]
-            expected = {
-                (proposal.start, proposal.end) for proposal, _ in batch
-            }
-            last_error: ValueError | None = None
-            for _ in range(self.config.llm.max_retries + 1):
-                response = self.llm_backend.generate_json(
+        batches = [
+            with_candidates[start : start + TERMINOLOGY_RERANK_BATCH_SIZE]
+            for start in range(
+                0,
+                len(with_candidates),
+                TERMINOLOGY_RERANK_BATCH_SIZE,
+            )
+        ]
+
+        def rerank_job(
+            job: tuple[int, list[tuple[SpanProposal, list[LinkCandidate]]]],
+        ) -> tuple[int, list[CandidateSelection]]:
+            batch_index, batch = job
+            response = self._rerank_batch(
+                task,
+                document,
+                batch,
+                limit,
+                batch_index,
+                checkpoint_dir,
+                reasoning_enabled=True,
+                call_suffix="",
+            )
+            error = self._rerank_response_error(batch, response, limit)
+            if error is not None and self.config.llm.decision_retries:
+                response = self._rerank_batch(
                     task,
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Rerank only supplied terminology candidates. Think "
-                                "carefully, then return JSON only. Never invent or "
-                                f"modify an identifier. Return at most {limit} IDs "
-                                f"per position. {policy}"
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"TEXT:\n<<<\n{document.text}\n>>>\n\n"
-                                "MENTIONS:\n"
-                                f"{json.dumps(payload, ensure_ascii=False)}\n\n"
-                                'Return {"selections":[{"position":[start,end],'
-                                '"candidates":["ID"],"confidence":0.0}]}. Return '
-                                "exactly one selection for every supplied position."
-                            ),
-                        },
-                    ],
-                    BatchCandidateSelectionResponse,
-                    max_new_tokens=RERANK_MAX_NEW_TOKENS,
+                    document,
+                    batch,
+                    limit,
+                    batch_index,
+                    checkpoint_dir,
+                    reasoning_enabled=False,
+                    call_suffix="-decision-fallback",
                 )
-                returned = [tuple(row.position) for row in response.selections]
-                returned_set = set(returned)
-                invented_positions = returned_set - expected
-                if invented_positions:
-                    raise ValueError(
-                        "LLM terminology reranking invented or changed positions: "
-                        f"{sorted(invented_positions)}"
-                    )
-                if len(returned) != len(returned_set):
-                    last_error = ValueError(
-                        "LLM terminology reranking returned duplicate positions"
-                    )
-                    continue
-                if returned_set != expected:
-                    last_error = ValueError(
-                        "LLM terminology reranking omitted required positions"
-                    )
-                    continue
-                invalid_decision = False
-                for row in response.selections:
-                    position = tuple(row.position)
-                    if len(row.candidates) > limit or len(row.candidates) != len(
-                        set(row.candidates)
-                    ):
-                        last_error = ValueError(
-                            "LLM returned too many or duplicate candidate IDs"
-                        )
-                        invalid_decision = True
-                        break
-                    allowed = candidates_by_position[position]
-                    if any(
-                        identifier not in allowed for identifier in row.candidates
-                    ):
-                        raise ValueError("LLM invented a terminology candidate ID")
-                if invalid_decision:
-                    continue
-                for row in response.selections:
-                    position = tuple(row.position)
-                    allowed = candidates_by_position[position]
-                    selected[position] = [
-                        allowed[identifier] for identifier in row.candidates
-                    ]
-                break
-            else:
+                error = self._rerank_response_error(batch, response, limit)
+            if error is not None:
                 raise RuntimeError(
-                    "LLM terminology reranking remained incomplete after "
-                    f"{self.config.llm.max_retries + 1} attempts"
-                ) from last_error
+                    f"LLM terminology batch {batch_index} invalid: {error}"
+                )
+            return batch_index, response.selections
+
+        for _, rows in self._parallel_map(list(enumerate(batches)), rerank_job):
+            for row in rows:
+                position = tuple(row.position)
+                allowed = candidates_by_position[position]
+                selected[position] = [
+                    allowed[identifier] for identifier in row.candidates
+                ]
         return selected
+
+    def _rerank_batch(
+        self,
+        task: LLMTask,
+        document: Document,
+        batch: list[tuple[SpanProposal, list[LinkCandidate]]],
+        limit: int,
+        batch_index: int,
+        checkpoint_dir: Path | None,
+        *,
+        reasoning_enabled: bool,
+        call_suffix: str,
+    ) -> BatchCandidateSelectionResponse:
+        policy = (
+            "For ICD-10, choose the most specific code explicitly supported by "
+            "the mention and local context. Status Z codes are valid only when "
+            "the context expresses that factor rather than a disease."
+            if task == LLMTask.ICD_RERANK
+            else
+            "For RxNorm, prefer generic SCD when ingredient, strength, and form "
+            "are explicit; choose SBD only for an explicit brand; use IN when "
+            "only the ingredient is supported. Never assume missing details."
+        )
+        payload = [
+            {
+                "position": [proposal.start, proposal.end],
+                "mention": proposal.text,
+                "section": self.assertions.section_at(document.text, proposal.start),
+                **self._local_context(document, proposal.start, proposal.end),
+                "candidates": [
+                    {
+                        "id": row.identifier,
+                        "name": row.name,
+                        "type": row.terminology_type,
+                        "score": row.score,
+                        "metadata": row.metadata,
+                    }
+                    for row in candidates
+                ],
+            }
+            for proposal, candidates in batch
+        ]
+        return self.llm_backend.generate_json(
+            task,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Rerank only supplied terminology candidates. Think "
+                        "carefully, then return JSON only. Never invent or modify "
+                        f"an identifier. Return at most {limit} IDs per position. "
+                        f"{policy}"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "MENTIONS_WITH_LOCAL_CONTEXT:\n"
+                        f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+                        'Return {"selections":[{"position":[start,end],'
+                        '"candidates":["ID"],"confidence":0.0}]}. Return exactly '
+                        "one selection for every supplied position."
+                    ),
+                },
+            ],
+            BatchCandidateSelectionResponse,
+            max_new_tokens=(
+                RERANK_MAX_NEW_TOKENS
+                if reasoning_enabled
+                else FALLBACK_MAX_NEW_TOKENS
+            ),
+            reasoning_enabled=reasoning_enabled,
+            call_id=(
+                f"{document.id}/{task.value}-{batch_index:03d}{call_suffix}"
+            ),
+            checkpoint_dir=checkpoint_dir,
+        )
+
+    @staticmethod
+    def _rerank_response_error(
+        batch: list[tuple[SpanProposal, list[LinkCandidate]]],
+        response: BatchCandidateSelectionResponse,
+        limit: int,
+    ) -> str | None:
+        expected = {
+            (proposal.start, proposal.end): {
+                row.identifier for row in candidates
+            }
+            for proposal, candidates in batch
+        }
+        returned = [tuple(row.position) for row in response.selections]
+        returned_set = set(returned)
+        invented = returned_set - set(expected)
+        if invented:
+            raise ValueError(
+                "LLM terminology reranking invented or changed positions: "
+                f"{sorted(invented)}"
+            )
+        if len(returned) != len(returned_set):
+            return "duplicate positions"
+        if returned_set != set(expected):
+            return "omitted required positions"
+        for row in response.selections:
+            if (
+                len(row.candidates) > limit
+                or len(row.candidates) != len(set(row.candidates))
+            ):
+                return "too many or duplicate candidate IDs"
+            if any(
+                identifier not in expected[tuple(row.position)]
+                for identifier in row.candidates
+            ):
+                raise ValueError("LLM invented a terminology candidate ID")
+        return None
 
     def _recover_entities(
         self,
@@ -629,12 +850,16 @@ class ClinicalPipeline:
         chunks: list[Chunk],
         existing: list[SpanProposal],
         warnings: list[str],
+        checkpoint_dir: Path | None = None,
     ) -> tuple[list[SpanProposal], list[dict[str, Any]]]:
         proposals: list[SpanProposal] = []
         audit: list[dict[str, Any]] = []
         unsupported_types = 0
         missing_substrings = 0
-        for chunk in chunks:
+
+        def recovery_job(
+            chunk: Chunk,
+        ) -> tuple[Chunk, EntityRecoveryResponse]:
             chunk_existing = [
                 {"text": row.text, "type": row.type.value}
                 for row in existing
@@ -646,10 +871,10 @@ class ClinicalPipeline:
                     {
                         "role": "system",
                         "content": (
-                            "Extract only explicit clinical entities. Copy text "
-                            "exactly. Never generate offsets. Return missing entities "
-                            "only. Think carefully, then return JSON only in the "
-                            "final answer. Allowed types are TRIỆU_CHỨNG, "
+                            "Exhaustively extract explicit clinical entities that "
+                            "are absent from EXISTING_ENTITIES. Copy text exactly. "
+                            "Never generate offsets or repeat an existing entity. "
+                            "Return JSON only. Allowed types are TRIỆU_CHỨNG, "
                             "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC."
                         ),
                     },
@@ -666,7 +891,13 @@ class ClinicalPipeline:
                 ],
                 EntityRecoveryResponse,
                 max_new_tokens=RECOVERY_MAX_NEW_TOKENS,
+                reasoning_enabled=False,
+                call_id=f"{document.id}/recovery-{chunk.index:03d}",
+                checkpoint_dir=checkpoint_dir,
             )
+            return chunk, response
+
+        for chunk, response in self._parallel_map(chunks, recovery_job):
             for row in response.entities:
                 type_value = row.type.strip()
                 try:
@@ -728,6 +959,335 @@ class ClinicalPipeline:
             )
         return proposals, audit
 
+    def _filter_merged_proposals(
+        self,
+        proposals: list[SpanProposal],
+    ) -> tuple[list[SpanProposal], list[dict[str, Any]]]:
+        kept: list[SpanProposal] = []
+        artifacts: list[dict[str, Any]] = []
+        for proposal in proposals:
+            normalized = normalize_search(proposal.text)
+            reject = proposal.type == EntityType.MEDICATION and (
+                normalized in POST_MERGE_NON_MEDICATIONS
+                or bool(
+                    re.fullmatch(
+                        r"thuốc(?:\s+(?:đang\s+dùng|trước\s+nhập\s+viện|"
+                        r"điều\s+trị|kê\s+đơn))?",
+                        normalized,
+                    )
+                )
+            )
+            if not reject:
+                kept.append(proposal)
+                continue
+            artifacts.append(
+                {
+                    "position": [proposal.start, proposal.end],
+                    "text": proposal.text,
+                    "initial_type": proposal.type.value,
+                    "keep": False,
+                    "decision_source": "deterministic_filter",
+                    "reason": "source_independent_non_medication_exclusion",
+                    "supporting_sources": proposal.evidence.get(
+                        "supporting_sources",
+                        [proposal.source],
+                    ),
+                }
+            )
+        return kept, artifacts
+
+    @staticmethod
+    def _automatic_review_artifact(
+        proposal: SpanProposal,
+        assertions: list[str],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "position": [proposal.start, proposal.end],
+            "text": proposal.text,
+            "initial_type": proposal.type.value,
+            "initial_assertions": assertions,
+            "keep": True,
+            "reviewed_type": proposal.type.value,
+            "reviewed_assertions": assertions,
+            "decision_source": "automatic",
+            "reason": reason,
+            "supporting_sources": proposal.evidence.get(
+                "supporting_sources",
+                [proposal.source],
+            ),
+        }
+
+    def _selective_review_reasons(
+        self,
+        document: Document,
+        proposal: SpanProposal,
+        initial_assertions: list[str],
+        warnings: list[str],
+    ) -> list[str]:
+        sources = set(
+            proposal.evidence.get(
+                "supporting_sources",
+                proposal.evidence.get("sources", [proposal.source]),
+            )
+        )
+        sources.add(proposal.source)
+        reasons: list[str] = []
+        if "llm_recovery" in sources:
+            reasons.append("llm_recovery")
+        if (
+            sources <= {"gliner"}
+            and proposal.score < self.config.run.gliner_review_threshold
+        ):
+            reasons.append("low_confidence_gliner_only")
+        if proposal.evidence.get("type_conflict"):
+            reasons.append("type_conflict")
+        if initial_assertions:
+            reasons.append("assertion_rule")
+        elif self.assertions.has_context_cue(document.text, proposal):
+            reasons.append("nearby_assertion_cue")
+        if proposal.type == EntityType.MEDICATION:
+            structured_sources = {
+                "structured_medication_rule",
+                "structured_medication_sig",
+            }
+            if not sources & structured_sources and not self._has_strong_rxnorm(
+                proposal.text,
+                warnings,
+            ):
+                reasons.append("unstructured_medication_without_strong_rxnorm")
+        if (
+            proposal.type == EntityType.TEST_RESULT
+            and not self._valid_laboratory_result_span(proposal.text)
+        ):
+            reasons.append("laboratory_span_policy")
+        return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _valid_laboratory_result_span(text: str) -> bool:
+        value = text.strip()
+        return bool(
+            QUALITATIVE_RESULT_RE.fullmatch(value)
+            or NUMERIC_RESULT_RE.fullmatch(value)
+        )
+
+    def _has_strong_rxnorm(
+        self,
+        mention: str,
+        warnings: list[str],
+    ) -> bool:
+        candidates = self._retrieve_rxnorm(mention, warnings)
+        if not candidates:
+            return False
+        return (
+            self._is_exact_candidate(candidates[0])
+            or candidates[0].score >= self.config.linking.auto_exact_score
+        )
+
+    def _retrieve_icd(self, mention: str) -> list[LinkCandidate]:
+        key = ("icd", normalize_search(mention))
+        with self._retrieval_lock:
+            cached = self._retrieval_cache.get(key)
+        if cached is not None:
+            return list(cached)
+        rows = self.icd_index.retrieve(
+            mention,
+            limit=self.config.linking.retrieval_candidates,
+        )
+        with self._retrieval_lock:
+            self._retrieval_cache[key] = list(rows)
+        return rows
+
+    def _eligible_candidates(
+        self,
+        task: LLMTask,
+        candidates: list[LinkCandidate],
+    ) -> list[LinkCandidate]:
+        threshold = (
+            self.config.linking.icd_min_score
+            if task == LLMTask.ICD_RERANK
+            else self.config.linking.rxnorm_min_score
+        )
+        return [
+            row
+            for row in candidates
+            if self._is_exact_candidate(row) or row.score >= threshold
+        ]
+
+    @staticmethod
+    def _is_exact_candidate(candidate: LinkCandidate) -> bool:
+        return any(
+            source in {"exact", "rxnav_exact_or_normalized"}
+            or "exact_or_normalized" in source
+            for source in candidate.retrieval_sources
+        )
+
+    def _automatic_candidate_selection(
+        self,
+        candidates: list[LinkCandidate],
+    ) -> tuple[list[str] | None, str]:
+        if not candidates:
+            return [], "empty_after_threshold"
+        top = candidates[0]
+        if (
+            self._is_exact_candidate(top)
+            and top.score >= self.config.linking.auto_exact_score
+        ):
+            return [top.identifier], "exact_or_normalized"
+        if (
+            len(candidates) == 1
+            and top.score >= self.config.linking.auto_single_score
+        ):
+            return [top.identifier], "single_strong_candidate"
+        if (
+            len(candidates) >= 2
+            and top.score >= self.config.linking.auto_top_score
+            and top.score - candidates[1].score
+            >= self.config.linking.auto_score_margin
+        ):
+            return [top.identifier], "strong_top_margin"
+        return None, "ambiguous"
+
+    def _select_terminology(
+        self,
+        task: LLMTask,
+        document: Document,
+        entries: list[tuple[SpanProposal, list[LinkCandidate]]],
+        limit: int,
+        checkpoint_dir: Path | None,
+    ) -> tuple[
+        dict[tuple[int, int], list[LinkCandidate]],
+        dict[tuple[int, int], dict[str, Any]],
+    ]:
+        selected = {
+            (proposal.start, proposal.end): []
+            for proposal, _ in entries
+        }
+        decisions: dict[tuple[int, int], dict[str, Any]] = {}
+        groups: dict[
+            tuple[str, tuple[str, ...]],
+            list[tuple[SpanProposal, list[LinkCandidate]]],
+        ] = {}
+        for proposal, retrieved in entries:
+            eligible = self._eligible_candidates(task, retrieved)
+            key = (
+                normalize_search(proposal.text),
+                tuple(row.identifier for row in eligible),
+            )
+            groups.setdefault(key, []).append((proposal, eligible))
+
+        ambiguous_representatives: list[
+            tuple[SpanProposal, list[LinkCandidate]]
+        ] = []
+        ambiguous_groups: dict[
+            tuple[int, int],
+            list[tuple[SpanProposal, list[LinkCandidate]]],
+        ] = {}
+        for grouped_entries in groups.values():
+            representative, eligible = grouped_entries[0]
+            candidate_ids, reason = self._automatic_candidate_selection(eligible)
+            if candidate_ids is None:
+                ambiguous_representatives.append((representative, eligible))
+                ambiguous_groups[
+                    (representative.start, representative.end)
+                ] = grouped_entries
+                continue
+            for index, (proposal, proposal_candidates) in enumerate(grouped_entries):
+                position = (proposal.start, proposal.end)
+                by_id = {
+                    row.identifier: row for row in proposal_candidates
+                }
+                selected[position] = [
+                    by_id[identifier]
+                    for identifier in candidate_ids
+                    if identifier in by_id
+                ]
+                decisions[position] = {
+                    "decision_source": (
+                        "automatic" if index == 0 else "reused_automatic"
+                    ),
+                    "reason": reason,
+                    "deduplication_key": [
+                        normalize_search(proposal.text),
+                        list(by_id),
+                    ],
+                }
+
+        if ambiguous_representatives:
+            reranked = self._batch_rerank(
+                task,
+                document,
+                ambiguous_representatives,
+                limit,
+                checkpoint_dir,
+            )
+            for representative, _ in ambiguous_representatives:
+                representative_position = (
+                    representative.start,
+                    representative.end,
+                )
+                chosen_ids = [
+                    row.identifier
+                    for row in reranked[representative_position]
+                ]
+                for index, (proposal, proposal_candidates) in enumerate(
+                    ambiguous_groups[representative_position]
+                ):
+                    position = (proposal.start, proposal.end)
+                    by_id = {
+                        row.identifier: row for row in proposal_candidates
+                    }
+                    selected[position] = [
+                        by_id[identifier]
+                        for identifier in chosen_ids
+                        if identifier in by_id
+                    ]
+                    decisions[position] = {
+                        "decision_source": (
+                            "llm" if index == 0 else "reused_llm"
+                        ),
+                        "reason": "ambiguous_candidates",
+                        "representative_position": list(
+                            representative_position
+                        ),
+                    }
+        return selected, decisions
+
+    def _local_context(
+        self,
+        document: Document,
+        start: int,
+        end: int,
+    ) -> dict[str, Any]:
+        context_chars = self.config.run.review_context_chars
+        context_start = max(0, start - context_chars)
+        context_end = min(len(document.text), end + context_chars)
+        return {
+            "context_start": context_start,
+            "context_end": context_end,
+            "left_context": document.text[context_start:start],
+            "right_context": document.text[end:context_end],
+        }
+
+    def _parallel_map(self, items: list[Any], function: Any) -> list[Any]:
+        if len(items) <= 1 or self.config.llm.max_concurrency <= 1:
+            return [function(item) for item in items]
+        workers = min(self.config.llm.max_concurrency, len(items))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(function, items))
+
+    def _document_call_audits(self, document_id: str) -> list[dict[str, Any]]:
+        method = getattr(self.llm_backend, "call_audits", None)
+        if method is None:
+            return []
+        prefix = f"{document_id}/"
+        return [
+            row
+            for row in method()
+            if str(row.get("call_id", "")).startswith(prefix)
+        ]
+
     @staticmethod
     def _filter_ner_proposals(
         proposals: list[SpanProposal],
@@ -769,13 +1329,19 @@ class ClinicalPipeline:
         mention: str,
         warnings: list[str],
     ) -> list[LinkCandidate]:
+        cache_key = ("rxnorm", normalize_search(mention))
+        with self._retrieval_lock:
+            cached = self._retrieval_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
         merged: dict[str, LinkCandidate] = {}
         for variant in query_variants(mention):
             try:
-                rows = self.rxnorm_index.retrieve(
-                    variant,
-                    limit=self.config.linking.retrieval_candidates,
-                )
+                with self._retrieval_lock:
+                    rows = self.rxnorm_index.retrieve(
+                        variant,
+                        limit=self.config.linking.retrieval_candidates,
+                    )
             except Exception as exc:
                 if self.config.run.fail_on_model_unavailable:
                     raise
@@ -788,10 +1354,13 @@ class ClinicalPipeline:
                 old = merged.get(row.identifier)
                 if old is None or row.score > old.score:
                     merged[row.identifier] = row
-        return sorted(
+        result = sorted(
             merged.values(),
             key=lambda row: (-row.score, row.identifier),
         )[: self.config.linking.retrieval_candidates]
+        with self._retrieval_lock:
+            self._retrieval_cache[cache_key] = list(result)
+        return result
 
     def _rerank_if_needed(
         self,
@@ -849,7 +1418,9 @@ class ClinicalPipeline:
     def _candidate_artifact(
         proposal: SpanProposal,
         retrieved: list[LinkCandidate],
+        eligible: list[LinkCandidate],
         selected: list[LinkCandidate],
+        decision: dict[str, Any] | None,
     ) -> dict[str, Any]:
         return {
             "position": [proposal.start, proposal.end],
@@ -857,7 +1428,15 @@ class ClinicalPipeline:
             "retrieved_candidates": [
                 row.model_dump(mode="json") for row in retrieved
             ],
+            "eligible_candidates": [
+                row.model_dump(mode="json") for row in eligible
+            ],
             "selected_candidates": [
                 row.model_dump(mode="json") for row in selected
             ],
+            "decision": decision
+            or {
+                "decision_source": "legacy",
+                "reason": "review_mode_not_selective",
+            },
         }

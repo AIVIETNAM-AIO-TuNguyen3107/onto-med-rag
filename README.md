@@ -170,3 +170,51 @@ cp configs/api_first5.example.yaml configs/api_first5.local.yaml
 Set the provider's exact `/v1`-style base endpoint, returned model ID, and
 credential environment-variable name in the local YAML. Never put the
 credential value itself in the configuration.
+
+## Selective OpenRouter first-five assessment
+
+The selective configuration keeps exhaustive entity recovery non-reasoning,
+reviews only uncertain spans, resolves strong terminology matches locally, and
+uses reasoning only for uncertain entities and ambiguous candidate sets.
+Validated responses are cached in SQLite and every batch is atomically
+checkpointed, so an interrupted document can reuse completed work.
+
+Copy the template and export the credential without writing it to a file:
+
+```bash
+cp configs/openrouter_selective_first5.example.yaml \
+  configs/openrouter_selective_first5.local.yaml
+export OPENROUTER_API_KEY="your-rotated-key"
+```
+
+Run and inspect document 1 before authorizing the remaining four:
+
+```bash
+clinical-nlp --config configs/openrouter_selective_first5.local.yaml infer \
+  --documents 1 \
+  --run-id openrouter-selective-first5-assessment
+
+clinical-nlp --config configs/openrouter_selective_first5.local.yaml validate \
+  --documents 1 \
+  --run-id openrouter-selective-first5-assessment
+```
+
+Check `documents/1/validation.json`, `llm_calls.json`, `llm_reviews.json`,
+`icd_candidates.json`, and `rxnorm_candidates.json`. Document 1 is ready for
+manual acceptance only if `băng phiến` and `long não` are not medications,
+G6PD links only to `D55.0`, reasoning calls are at most two, logical LLM calls
+are at most seven, API latency is at most eight minutes, and cost is at most
+USD 0.01.
+
+After that inspection, resume with exactly the first five IDs:
+
+```bash
+clinical-nlp --config configs/openrouter_selective_first5.local.yaml infer \
+  --documents 1 2 3 4 5 \
+  --run-id openrouter-selective-first5-assessment \
+  --resume
+```
+
+This workflow never selects documents outside `1` through `5`. Cache and
+checkpoint artifacts contain validated JSON and safe usage metadata only; raw
+provider output, reasoning text, and credentials are not persisted.
