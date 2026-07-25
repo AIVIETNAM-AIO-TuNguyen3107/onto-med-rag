@@ -206,12 +206,21 @@ G6PD links only to `D55.0`, reasoning calls are at most two, logical LLM calls
 are at most seven, API latency is at most eight minutes, and cost is at most
 USD 0.01.
 
-After that inspection, resume with exactly the first five IDs:
+After that inspection, start a first-five run with a new run ID. Validated
+document-1 responses are reused from the global cache:
 
 ```bash
 clinical-nlp --config configs/openrouter_selective_first5.local.yaml infer \
   --documents 1 2 3 4 5 \
-  --run-id openrouter-selective-first5-assessment \
+  --run-id openrouter-selective-first5
+```
+
+If that first-five run is interrupted, resume it with the same selection:
+
+```bash
+clinical-nlp --config configs/openrouter_selective_first5.local.yaml infer \
+  --documents 1 2 3 4 5 \
+  --run-id openrouter-selective-first5 \
   --resume
 ```
 
