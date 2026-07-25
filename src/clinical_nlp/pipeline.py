@@ -670,8 +670,8 @@ class ClinicalPipeline:
         returned_set = set(returned)
         invented = returned_set - expected
         if invented:
-            raise ValueError(
-                "LLM entity review invented or changed positions: "
+            return (
+                "invented or changed positions: "
                 f"{sorted(invented)}"
             )
         if len(returned) != len(returned_set):
@@ -872,8 +872,8 @@ class ClinicalPipeline:
         returned_set = set(returned)
         invented = returned_set - set(expected)
         if invented:
-            raise ValueError(
-                "LLM terminology reranking invented or changed positions: "
+            return (
+                "invented or changed positions: "
                 f"{sorted(invented)}"
             )
         if len(returned) != len(returned_set):
@@ -890,7 +890,7 @@ class ClinicalPipeline:
                 identifier not in expected[tuple(row.position)]
                 for identifier in row.candidates
             ):
-                raise ValueError("LLM invented a terminology candidate ID")
+                return "invented a terminology candidate ID"
         return None
 
     def _recover_entities(

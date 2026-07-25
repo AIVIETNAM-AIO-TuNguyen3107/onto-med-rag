@@ -352,6 +352,34 @@ def test_ambiguous_normalized_mentions_share_one_llm_decision(
     assert decisions[(20, 26)]["decision_source"] == "reused_llm"
 
 
+def test_invalid_rerank_position_uses_decision_fallback(tmp_path: Path) -> None:
+    invalid = BatchCandidateSelectionResponse(
+        selections=[
+            CandidateSelection(position=(0, 0), candidates=["A00"])
+        ]
+    )
+    valid = BatchCandidateSelectionResponse(
+        selections=[
+            CandidateSelection(position=(0, 6), candidates=["A00"])
+        ]
+    )
+    llm = FakeLLM([invalid, valid])
+    pipeline = _pipeline(tmp_path, llm)
+    proposal = _proposal("bệnh x", start=0)
+
+    selected = pipeline._batch_rerank(
+        LLMTask.ICD_RERANK,
+        Document(id="1", text="bệnh x"),
+        [(proposal, [_candidate("A00", 0.8)])],
+        limit=3,
+    )
+
+    assert [row.identifier for row in selected[(0, 6)]] == ["A00"]
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["reasoning_enabled"] is True
+    assert llm.calls[1]["reasoning_enabled"] is False
+
+
 def test_parallel_map_preserves_input_order(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path)
     pipeline.config.llm.max_concurrency = 2

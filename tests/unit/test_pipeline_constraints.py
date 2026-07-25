@@ -86,7 +86,7 @@ def test_entity_review_cannot_change_positions(tmp_path: Path) -> None:
         source="test",
     )
 
-    with pytest.raises(ValueError, match="positions"):
+    with pytest.raises(RuntimeError, match="positions"):
         pipeline._review_entities(document, [proposal], {(0, 2): []})
 
 
@@ -216,7 +216,7 @@ def test_batch_rerank_cannot_invent_candidate_ids(tmp_path: Path) -> None:
         terminology_type="ICD10:disease",
     )
 
-    with pytest.raises(ValueError, match="invented"):
+    with pytest.raises(RuntimeError, match="invented"):
         pipeline._batch_rerank(
             task="icd_rerank",
             document=Document(id="x", text="bệnh x"),
