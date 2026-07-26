@@ -379,7 +379,7 @@ class ClinicalPipeline:
                 "thinking": self.config.llm.thinking,
                 "review_mode": self.config.run.llm_review_mode,
                 "task_reasoning": {
-                    "entity_recovery": True,
+                    "entity_recovery": False,
                     "entity_review": self.config.llm.reasoning_enabled,
                     "terminology_rerank": self.config.llm.reasoning_enabled,
                 },
@@ -1169,7 +1169,7 @@ class ClinicalPipeline:
     ) -> EntityRecoveryResponse:
         quality_policy = (
             "The previous extraction was pathologically dense. Return at most "
-            "30 high-confidence missing entities. Never label ordinary words, "
+            "30 high-confidence entities. Never label ordinary words, "
             "punctuation, anatomy alone, headings, durations, ages, percentages, "
             "foods, activities, or treatment instructions as entities. A "
             "single-word span is valid only when it is independently a clear "
@@ -1185,11 +1185,12 @@ class ClinicalPipeline:
                     "content": (
                         "Independently and exhaustively extract every explicit "
                         "clinical entity mention in TEXT_CHUNK. First scan the "
-                        "entire chunk without using EXISTING_ENTITIES as an "
-                        "anchor. Then omit only exact text + occurrence + type "
-                        "triples already listed in EXISTING_ENTITIES; include "
-                        "another occurrence of the same text when it is not "
-                        "listed. Copy text exactly. Never generate offsets. "
+                        "entire chunk. EXISTING_ENTITIES contains supplemental "
+                        "hints, not an exclusion list and not a complete inventory. "
+                        "Return every entity, including entities listed there; the "
+                        "host will de-duplicate them. For repeated text, report its "
+                        "one-based occurrence within TEXT_CHUNK. Copy text exactly. "
+                        "Never generate offsets. "
                         "Return JSON only. Allowed types are TRIỆU_CHỨNG, "
                         "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC. "
                         f"{quality_policy}"
@@ -1208,7 +1209,7 @@ class ClinicalPipeline:
             ],
             EntityRecoveryResponse,
             max_new_tokens=RECOVERY_MAX_NEW_TOKENS,
-            reasoning_enabled=not strict,
+            reasoning_enabled=False,
             call_id=(
                 f"{document.id}/recovery-{chunk.index:03d}"
                 + ("-quality-fallback" if strict else "")

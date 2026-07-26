@@ -391,10 +391,10 @@ def test_recovery_audits_unknown_types_and_uses_chunk_budget(
     assert audit[0]["reason"] == "unsupported_entity_type"
     assert "unsupported entity types" in warnings[0]
     assert pipeline.llm_backend.calls[0]["max_new_tokens"] == 4096
-    assert pipeline.llm_backend.calls[0]["reasoning_enabled"] is True
+    assert pipeline.llm_backend.calls[0]["reasoning_enabled"] is False
     assert (
         pipeline.model_metadata()["llm"]["task_reasoning"]["entity_recovery"]
-        is True
+        is False
     )
 
 
@@ -436,6 +436,8 @@ def test_recovery_scans_independently_and_tracks_existing_occurrences(
     system_prompt = pipeline.llm_backend.calls[0]["messages"][0]["content"]
     user_prompt = pipeline.llm_backend.calls[0]["messages"][1]["content"]
     assert "Independently and exhaustively" in system_prompt
+    assert "not an exclusion list" in system_prompt
+    assert "Return every entity" in system_prompt
     assert "Never generate offsets" in system_prompt
     assert '"occurrence": 1' in user_prompt
     assert '"text": "ho"' in user_prompt
@@ -482,7 +484,7 @@ def test_suspicious_recovery_chunk_retries_once_without_reasoning(
     assert len(pipeline.llm_backend.calls) == 2
     assert [
         row["reasoning_enabled"] for row in pipeline.llm_backend.calls
-    ] == [True, False]
+    ] == [False, False]
     assert pipeline.llm_backend.calls[1]["call_id"].endswith(
         "-quality-fallback"
     )
