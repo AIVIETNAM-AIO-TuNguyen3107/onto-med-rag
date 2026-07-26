@@ -97,17 +97,21 @@ class Entity(BaseModel):
         linkable = self.type in {EntityType.DIAGNOSIS, EntityType.MEDICATION}
         if linkable and self.candidates is None:
             self.candidates = []
-        if not linkable and self.candidates is not None:
-            raise ValueError("candidates are only allowed for diagnoses and medications")
+        if not linkable:
+            if self.candidates:
+                raise ValueError(
+                    "non-empty candidates are only allowed for diagnoses "
+                    "and medications"
+                )
+            self.candidates = None
         return self
 
     def output_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "text": self.text,
             "type": self.type.value,
+            "candidates": self.candidates or [],
         }
-        if self.candidates is not None:
-            data["candidates"] = self.candidates
         data["assertions"] = [value.value for value in self.assertions]
         data["position"] = list(self.position)
         return data

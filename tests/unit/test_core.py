@@ -87,3 +87,23 @@ def test_output_directory_can_validate_selected_subset(tmp_path: Path) -> None:
     )
 
     validate_output_directory(output_dir, input_dir, expected_stems={"1"})
+
+
+def test_non_linkable_output_includes_empty_candidates_and_round_trips() -> None:
+    entity = Entity(
+        text="ho",
+        type=EntityType.SYMPTOM,
+        position=(0, 2),
+    )
+
+    payload = entity.output_dict()
+
+    assert payload["candidates"] == []
+    assert set(payload) == {
+        "text",
+        "type",
+        "candidates",
+        "assertions",
+        "position",
+    }
+    assert Entity.model_validate(payload) == entity
