@@ -6,6 +6,7 @@ import pytest
 
 from clinical_nlp.config import PipelineConfig
 from clinical_nlp.icd_linking import ICDIndex
+from clinical_nlp.llm.base import LLMDecisionError
 from clinical_nlp.ner.base import NoopNERBackend
 from clinical_nlp.pipeline import (
     BatchCandidateSelectionResponse,
@@ -49,9 +50,14 @@ class FakeLLM:
                 **kwargs,
             }
         )
-        if len(self.responses) > 1:
-            return self.responses.pop(0)
-        return self.responses[0]
+        response = (
+            self.responses.pop(0)
+            if len(self.responses) > 1
+            else self.responses[0]
+        )
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _pipeline(tmp_path: Path, response) -> ClinicalPipeline:
@@ -457,6 +463,36 @@ def test_incomplete_review_retries_once_then_preserves_original(
     assert "omitted required positions" in artifacts[0]["decision_error"]
     assert "preserved original entities" in warnings[0]
     assert len(pipeline.llm_backend.calls) == 2
+
+
+def test_structured_review_failures_preserve_original(tmp_path: Path) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        [
+            LLMDecisionError("invalid structured response"),
+            LLMDecisionError("invalid structured fallback"),
+        ],
+    )
+    proposal = SpanProposal(
+        start=0,
+        end=2,
+        text="ho",
+        type=EntityType.SYMPTOM,
+        source="test",
+    )
+    warnings: list[str] = []
+
+    reviewed, assertions, artifacts = pipeline._review_entities(
+        Document(id="x", text="ho"),
+        [proposal],
+        {(0, 2): []},
+        warnings=warnings,
+    )
+
+    assert reviewed == [proposal]
+    assert assertions == {(0, 2): []}
+    assert artifacts[0]["decision_source"] == "deterministic_fallback"
+    assert "structured response failure" in warnings[0]
 
 
 def test_terminology_reranking_is_batched_at_ten(tmp_path: Path) -> None:

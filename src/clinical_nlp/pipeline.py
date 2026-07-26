@@ -13,7 +13,12 @@ from clinical_nlp.assertion_detection import AssertionDetector
 from clinical_nlp.config import PipelineConfig
 from clinical_nlp.entity_finding import RuleEntityFinder, merge_proposals
 from clinical_nlp.icd_linking import ICDIndex
-from clinical_nlp.llm.base import LLMBackend, LLMTask, NoopLLMBackend
+from clinical_nlp.llm.base import (
+    LLMBackend,
+    LLMDecisionError,
+    LLMTask,
+    NoopLLMBackend,
+)
 from clinical_nlp.ner.base import NERBackend
 from clinical_nlp.normalization import normalize_search
 from clinical_nlp.rxnorm_linking import RxNormIndex
@@ -490,27 +495,37 @@ class ClinicalPipeline:
             job: tuple[int, list[SpanProposal]],
         ) -> tuple[int, list[ReviewedEntity], str | None]:
             batch_index, batch = job
-            response = self._review_batch(
-                document,
-                batch,
-                initial_assertions,
-                batch_index,
-                checkpoint_dir,
-                reasoning_enabled=True,
-                call_suffix="",
-            )
-            error = self._review_response_error(batch, response)
-            if error is not None and self.config.llm.decision_retries:
+            try:
                 response = self._review_batch(
                     document,
                     batch,
                     initial_assertions,
                     batch_index,
                     checkpoint_dir,
-                    reasoning_enabled=False,
-                    call_suffix="-decision-fallback",
+                    reasoning_enabled=True,
+                    call_suffix="",
                 )
+            except LLMDecisionError as exc:
+                response = None
+                error = f"structured response failure: {exc}"
+            else:
                 error = self._review_response_error(batch, response)
+            if error is not None and self.config.llm.decision_retries:
+                try:
+                    response = self._review_batch(
+                        document,
+                        batch,
+                        initial_assertions,
+                        batch_index,
+                        checkpoint_dir,
+                        reasoning_enabled=False,
+                        call_suffix="-decision-fallback",
+                    )
+                except LLMDecisionError as exc:
+                    response = None
+                    error = f"structured response failure: {exc}"
+                else:
+                    error = self._review_response_error(batch, response)
             if error is not None:
                 preserved = [
                     ReviewedEntity(
@@ -771,18 +786,7 @@ class ClinicalPipeline:
             job: tuple[int, list[tuple[SpanProposal, list[LinkCandidate]]]],
         ) -> tuple[int, list[CandidateSelection]]:
             batch_index, batch = job
-            response = self._rerank_batch(
-                task,
-                document,
-                batch,
-                limit,
-                batch_index,
-                checkpoint_dir,
-                reasoning_enabled=True,
-                call_suffix="",
-            )
-            error = self._rerank_response_error(batch, response, limit)
-            if error is not None and self.config.llm.decision_retries:
+            try:
                 response = self._rerank_batch(
                     task,
                     document,
@@ -790,10 +794,31 @@ class ClinicalPipeline:
                     limit,
                     batch_index,
                     checkpoint_dir,
-                    reasoning_enabled=False,
-                    call_suffix="-decision-fallback",
+                    reasoning_enabled=True,
+                    call_suffix="",
                 )
+            except LLMDecisionError as exc:
+                response = None
+                error = f"structured response failure: {exc}"
+            else:
                 error = self._rerank_response_error(batch, response, limit)
+            if error is not None and self.config.llm.decision_retries:
+                try:
+                    response = self._rerank_batch(
+                        task,
+                        document,
+                        batch,
+                        limit,
+                        batch_index,
+                        checkpoint_dir,
+                        reasoning_enabled=False,
+                        call_suffix="-decision-fallback",
+                    )
+                except LLMDecisionError as exc:
+                    response = None
+                    error = f"structured response failure: {exc}"
+                else:
+                    error = self._rerank_response_error(batch, response, limit)
             if error is not None:
                 return (
                     batch_index,
@@ -957,23 +982,51 @@ class ClinicalPipeline:
                 for row in existing
                 if row.start >= chunk.start and row.end <= chunk.end
             ]
-            response = self._recover_chunk(
-                document,
-                chunk,
-                chunk_existing,
-                checkpoint_dir,
-                strict=False,
-            )
+            try:
+                response = self._recover_chunk(
+                    document,
+                    chunk,
+                    chunk_existing,
+                    checkpoint_dir,
+                    strict=False,
+                )
+            except LLMDecisionError as exc:
+                return (
+                    chunk,
+                    EntityRecoveryResponse(entities=[]),
+                    {
+                        "chunk_index": chunk.index,
+                        "status": "rejected",
+                        "reason": "invalid_structured_response",
+                        "detail": str(exc),
+                        "initial_row_count": 0,
+                        "retry_row_count": 0,
+                    },
+                )
             quality_error = self._recovery_quality_error(response)
             if quality_error is None:
                 return chunk, response, None
-            retry = self._recover_chunk(
-                document,
-                chunk,
-                chunk_existing,
-                checkpoint_dir,
-                strict=True,
-            )
+            try:
+                retry = self._recover_chunk(
+                    document,
+                    chunk,
+                    chunk_existing,
+                    checkpoint_dir,
+                    strict=True,
+                )
+            except LLMDecisionError as exc:
+                return (
+                    chunk,
+                    EntityRecoveryResponse(entities=[]),
+                    {
+                        "chunk_index": chunk.index,
+                        "status": "rejected",
+                        "reason": "invalid_structured_response",
+                        "detail": str(exc),
+                        "initial_row_count": len(response.entities),
+                        "retry_row_count": 0,
+                    },
+                )
             retry_error = self._recovery_quality_error(retry)
             if retry_error is None:
                 return (

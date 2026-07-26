@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 
 from clinical_nlp.atomic import atomic_write_json
 from clinical_nlp.config import ModelConfig
-from clinical_nlp.llm.base import LLMTask
+from clinical_nlp.llm.base import LLMDecisionError, LLMTask
 from clinical_nlp.llm.cache import LLMResponseCache
 from clinical_nlp.llm.parsing import parse_final_json
 
@@ -234,7 +234,7 @@ class OpenAICompatibleBackend:
         self._record_audit(audit, checkpoint_dir)
         if fatal_error is not None:
             raise fatal_error
-        raise RuntimeError(
+        raise LLMDecisionError(
             f"{task.value} failed after {attempts} HTTP attempt(s)"
         ) from last_error
 

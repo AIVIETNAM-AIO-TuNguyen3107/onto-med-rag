@@ -17,6 +17,10 @@ class LLMTask(StrEnum):
     RXNORM_RERANK = "rxnorm_rerank"
 
 
+class LLMDecisionError(RuntimeError):
+    """The provider responded, but no attempt matched the required schema."""
+
+
 class LLMBackend(Protocol):
     name: str
 

@@ -8,7 +8,7 @@ import requests
 from pydantic import BaseModel
 
 from clinical_nlp.config import ModelConfig
-from clinical_nlp.llm.base import LLMTask
+from clinical_nlp.llm.base import LLMDecisionError, LLMTask
 from clinical_nlp.llm.openai_compatible import OpenAICompatibleBackend
 
 
@@ -152,6 +152,28 @@ def test_huggingface_retries_success_response_without_choices(
     assert response.status == "ok"
     assert len(session.calls) == 2
     assert backend.call_audits()[0]["attempts"] == 2
+
+
+def test_invalid_structured_responses_raise_decision_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    session = FakeSession(
+        [
+            FakeResponse(200, _body("not-json")),
+            FakeResponse(200, _body("still-not-json")),
+        ]
+    )
+    backend = OpenAICompatibleBackend(_config(), session=session)
+
+    with pytest.raises(LLMDecisionError, match="failed after 2"):
+        backend.generate_json(
+            LLMTask.TYPE_ADJUDICATION,
+            [{"role": "user", "content": "test"}],
+            SmokeResponse,
+        )
+
+    assert backend.call_audits()[0]["status"] == "failed"
 
 
 def test_huggingface_requires_configured_token(
