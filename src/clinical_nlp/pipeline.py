@@ -76,7 +76,11 @@ NUMERIC_RESULT_RE = re.compile(
 class RecoveredEntity(BaseModel):
     text: str = Field(min_length=1)
     occurrence: int = Field(default=1, ge=1)
-    type: str
+    type: str = Field(
+        json_schema_extra={
+            "enum": [entity_type.value for entity_type in EntityType]
+        }
+    )
 
 
 class EntityRecoveryResponse(BaseModel):

@@ -398,6 +398,14 @@ def test_recovery_audits_unknown_types_and_uses_chunk_budget(
     )
 
 
+def test_recovery_schema_constrains_model_to_allowed_entity_types() -> None:
+    schema = RecoveredEntity.model_json_schema()
+
+    assert set(schema["properties"]["type"]["enum"]) == {
+        entity_type.value for entity_type in EntityType
+    }
+
+
 def test_recovery_scans_independently_and_tracks_existing_occurrences(
     tmp_path: Path,
 ) -> None:
