@@ -530,7 +530,12 @@ class ClinicalPipeline:
                 preserved = [
                     ReviewedEntity(
                         position=(proposal.start, proposal.end),
-                        keep=True,
+                        keep=not (
+                            proposal.type == EntityType.TEST_RESULT
+                            and not self._valid_laboratory_result_span(
+                                proposal.text
+                            )
+                        ),
                         type=proposal.type.value,
                         assertions=[
                             Assertion(value)
@@ -552,7 +557,7 @@ class ClinicalPipeline:
                 warnings.append(
                     "LLM entity review batch "
                     f"{batch_index} invalid after decision fallback; "
-                    f"preserved original entities: {fallback_error}"
+                    f"applied deterministic safe defaults: {fallback_error}"
                 )
             for row in rows:
                 position = tuple(row.position)

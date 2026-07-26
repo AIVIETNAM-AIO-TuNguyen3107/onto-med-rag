@@ -106,7 +106,7 @@ def test_entity_review_invalid_positions_preserve_original_entity(
     assert assertions == {(0, 2): []}
     assert artifacts[0]["decision_source"] == "deterministic_fallback"
     assert "positions" in artifacts[0]["decision_error"]
-    assert "preserved original entities" in warnings[0]
+    assert "deterministic safe defaults" in warnings[0]
     assert len(pipeline.llm_backend.calls) == 2
 
 
@@ -461,7 +461,7 @@ def test_incomplete_review_retries_once_then_preserves_original(
     assert assertions == {(0, 2): []}
     assert artifacts[0]["decision_source"] == "deterministic_fallback"
     assert "omitted required positions" in artifacts[0]["decision_error"]
-    assert "preserved original entities" in warnings[0]
+    assert "deterministic safe defaults" in warnings[0]
     assert len(pipeline.llm_backend.calls) == 2
 
 
@@ -493,6 +493,41 @@ def test_structured_review_failures_preserve_original(tmp_path: Path) -> None:
     assert assertions == {(0, 2): []}
     assert artifacts[0]["decision_source"] == "deterministic_fallback"
     assert "structured response failure" in warnings[0]
+
+
+def test_terminal_review_fallback_drops_invalid_lab_span(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 6),
+                    keep=True,
+                    type="OTHER",
+                )
+            ]
+        ),
+    )
+    proposal = SpanProposal(
+        start=0,
+        end=6,
+        text="1 viên",
+        type=EntityType.TEST_RESULT,
+        source="gliner",
+    )
+
+    reviewed, assertions, artifacts = pipeline._review_entities(
+        Document(id="x", text="1 viên"),
+        [proposal],
+        {(0, 6): []},
+    )
+
+    assert reviewed == []
+    assert assertions == {}
+    assert artifacts[0]["decision_source"] == "deterministic_fallback"
+    assert artifacts[0]["keep"] is False
 
 
 def test_terminology_reranking_is_batched_at_ten(tmp_path: Path) -> None:
