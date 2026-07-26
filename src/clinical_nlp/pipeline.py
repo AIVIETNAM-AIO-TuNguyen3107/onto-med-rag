@@ -4,6 +4,7 @@ import json
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -973,6 +974,7 @@ class ClinicalPipeline:
         proposals: list[SpanProposal] = []
         audit: list[dict[str, Any]] = []
         unsupported_types = 0
+        corrected_types = 0
         missing_substrings = 0
         quality_retries = 0
         quality_rejections = 0
@@ -1092,18 +1094,32 @@ class ClinicalPipeline:
                 try:
                     entity_type = EntityType(type_value)
                 except ValueError:
-                    unsupported_types += 1
+                    entity_type = self._closest_entity_type(type_value)
+                    if entity_type is None:
+                        unsupported_types += 1
+                        audit.append(
+                            {
+                                "chunk_index": chunk.index,
+                                "text": row.text,
+                                "type": row.type,
+                                "occurrence": row.occurrence,
+                                "status": "rejected",
+                                "reason": "unsupported_entity_type",
+                            }
+                        )
+                        continue
+                    corrected_types += 1
                     audit.append(
                         {
                             "chunk_index": chunk.index,
                             "text": row.text,
                             "type": row.type,
+                            "corrected_type": entity_type.value,
                             "occurrence": row.occurrence,
-                            "status": "rejected",
-                            "reason": "unsupported_entity_type",
+                            "status": "corrected",
+                            "reason": "unambiguous_near_match_entity_type",
                         }
                     )
-                    continue
                 try:
                     relative_start, relative_end = find_occurrence(
                         chunk.text,
@@ -1140,6 +1156,11 @@ class ClinicalPipeline:
             warnings.append(
                 "LLM recovery rejected "
                 f"{unsupported_types} row(s) with unsupported entity types"
+            )
+        if corrected_types:
+            warnings.append(
+                "LLM recovery corrected "
+                f"{corrected_types} unambiguous near-match entity type(s)"
             )
         if missing_substrings:
             warnings.append(
@@ -1189,8 +1210,10 @@ class ClinicalPipeline:
                         "hints, not an exclusion list and not a complete inventory. "
                         "Return every entity, including entities listed there; the "
                         "host will de-duplicate them. For repeated text, report its "
-                        "one-based occurrence within TEXT_CHUNK. Copy text exactly. "
-                        "Never generate offsets. "
+                        "one-based occurrence within TEXT_CHUNK. Copy one contiguous "
+                        "source span exactly: never omit intervening words, "
+                        "paraphrase, normalize, or join separate phrases. Never "
+                        "generate offsets. "
                         "Return JSON only. Allowed types are TRIỆU_CHỨNG, "
                         "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC. "
                         f"{quality_policy}"
@@ -1216,6 +1239,30 @@ class ClinicalPipeline:
             ),
             checkpoint_dir=checkpoint_dir,
         )
+
+    @staticmethod
+    def _closest_entity_type(value: str) -> EntityType | None:
+        normalized = normalize_search(value)
+        ranked = sorted(
+            (
+                (
+                    SequenceMatcher(
+                        None,
+                        normalized,
+                        normalize_search(candidate.value),
+                    ).ratio(),
+                    candidate,
+                )
+                for candidate in EntityType
+            ),
+            key=lambda row: row[0],
+            reverse=True,
+        )
+        top_score, top_candidate = ranked[0]
+        second_score = ranked[1][0]
+        if top_score < 0.75 or top_score - second_score < 0.10:
+            return None
+        return top_candidate
 
     @staticmethod
     def _occurrence_at(text: str, substring: str, start: int) -> int:

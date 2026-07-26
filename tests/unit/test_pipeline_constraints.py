@@ -443,6 +443,39 @@ def test_recovery_scans_independently_and_tracks_existing_occurrences(
     assert '"text": "ho"' in user_prompt
 
 
+def test_recovery_corrects_only_unambiguous_near_match_entity_types(
+    tmp_path: Path,
+) -> None:
+    text = "đại tiện ra máu đỏ tươi gián đoạn"
+    pipeline = _pipeline(
+        tmp_path,
+        EntityRecoveryResponse(
+            entities=[
+                RecoveredEntity(
+                    text=text,
+                    occurrence=1,
+                    type="TRIỆU_CHUGHT",
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text=text)
+    from clinical_nlp.text import chunk_document
+
+    proposals, audit = pipeline._recover_entities(
+        document,
+        chunk_document(document, max_chars=100, overlap_chars=10),
+        [],
+        [],
+    )
+
+    assert [(row.text, row.type) for row in proposals] == [
+        (text, EntityType.SYMPTOM)
+    ]
+    assert audit[0]["status"] == "corrected"
+    assert audit[0]["corrected_type"] == EntityType.SYMPTOM.value
+
+
 def test_suspicious_recovery_chunk_retries_once_without_reasoning(
     tmp_path: Path,
 ) -> None:

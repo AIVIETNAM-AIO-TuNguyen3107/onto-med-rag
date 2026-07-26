@@ -37,6 +37,15 @@ def test_repeated_occurrence() -> None:
     assert find_occurrence(text, "ho", 2) == (10, 12)
 
 
+def test_canonically_equivalent_occurrence_maps_to_original_offsets() -> None:
+    text = "có cục máu đông"
+
+    start, end = find_occurrence(text, "có cục máu đông")
+
+    assert text[start:end] == text
+    assert (start, end) == (0, len(text))
+
+
 def test_overlap_is_rejected() -> None:
     document = Document(id="x", text="đau đầu")
     entities = [

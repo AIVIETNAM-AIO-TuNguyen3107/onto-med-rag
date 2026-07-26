@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .schemas import Chunk, Document
 
@@ -63,12 +64,34 @@ def validate_chunk(document: Document, chunk: Chunk) -> None:
 def find_occurrence(text: str, substring: str, occurrence: int = 1) -> tuple[int, int]:
     if occurrence < 1:
         raise ValueError("occurrence is one-based")
-    start = -1
+    if not substring:
+        raise ValueError("substring must not be empty")
+    normalized_text_parts: list[str] = []
+    original_index_by_normalized_index: list[int] = []
+    for original_index, character in enumerate(text):
+        normalized_character = unicodedata.normalize("NFD", character)
+        normalized_text_parts.append(normalized_character)
+        original_index_by_normalized_index.extend(
+            [original_index] * len(normalized_character)
+        )
+    normalized_text = "".join(normalized_text_parts)
+    normalized_substring = unicodedata.normalize("NFD", substring)
     cursor = 0
-    for _ in range(occurrence):
-        start = text.find(substring, cursor)
+    valid_occurrences = 0
+    while True:
+        start = normalized_text.find(normalized_substring, cursor)
         if start < 0:
             raise ValueError("substring occurrence not found")
-        cursor = start + len(substring)
-    return start, start + len(substring)
-
+        end = start + len(normalized_substring)
+        original_start = original_index_by_normalized_index[start]
+        original_end = original_index_by_normalized_index[end - 1] + 1
+        if (
+            unicodedata.normalize("NFD", text[original_start:original_end])
+            == normalized_substring
+        ):
+            valid_occurrences += 1
+            if valid_occurrences == occurrence:
+                return original_start, original_end
+            cursor = end
+        else:
+            cursor = start + 1
