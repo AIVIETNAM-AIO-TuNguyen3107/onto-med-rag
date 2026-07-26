@@ -349,7 +349,7 @@ class OpenAICompatibleBackend:
             except _MalformedProviderResponse as exc:
                 last_error = exc
                 if transient_attempt >= self.config.max_retries:
-                    raise RuntimeError(
+                    raise LLMDecisionError(
                         f"{task.value} exhausted malformed response retries"
                     ) from exc
                 time.sleep(min(2.0**transient_attempt, 10.0))

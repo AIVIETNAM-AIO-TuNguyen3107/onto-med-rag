@@ -154,6 +154,33 @@ def test_huggingface_retries_success_response_without_choices(
     assert backend.call_audits()[0]["attempts"] == 2
 
 
+def test_exhausted_missing_choices_raise_decision_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "clinical_nlp.llm.openai_compatible.time.sleep",
+        lambda _: None,
+    )
+    session = FakeSession(
+        [
+            FakeResponse(200, {"error": {"message": "temporary"}}),
+            FakeResponse(200, {"error": {"message": "temporary"}}),
+            FakeResponse(200, {"error": {"message": "temporary"}}),
+        ]
+    )
+    backend = OpenAICompatibleBackend(_config(), session=session)
+
+    with pytest.raises(LLMDecisionError, match="malformed response"):
+        backend.generate_json(
+            LLMTask.TYPE_ADJUDICATION,
+            [{"role": "user", "content": "test"}],
+            SmokeResponse,
+        )
+
+    assert len(session.calls) == 3
+
+
 def test_invalid_structured_responses_raise_decision_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
