@@ -6,7 +6,7 @@ import pytest
 
 from clinical_nlp.config import PipelineConfig
 from clinical_nlp.icd_linking import ICDIndex
-from clinical_nlp.llm.base import LLMDecisionError
+from clinical_nlp.llm.base import LLMDecisionError, LLMTask
 from clinical_nlp.ner.base import NoopNERBackend
 from clinical_nlp.pipeline import (
     BatchCandidateSelectionResponse,
@@ -758,3 +758,172 @@ def test_duplicate_candidate_decision_retries_then_succeeds(
 
     assert len(pipeline.llm_backend.calls) == 2
     assert selected[(0, 2)][0].identifier == "A1"
+
+
+def test_review_cannot_erase_a_rule_detected_assertion(tmp_path: Path) -> None:
+    # The model's default output shape is an empty list; that is not evidence
+    # against a deterministic section rule.
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=True,
+                    type=EntityType.SYMPTOM,
+                    assertions=[],
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho")
+    proposal = SpanProposal(
+        start=0, end=2, text="ho", type=EntityType.SYMPTOM, source="test"
+    )
+
+    _, assertions, artifacts = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): ["isHistorical"]},
+        warnings=[],
+    )
+
+    assert assertions == {(0, 2): ["isHistorical"]}
+    assert artifacts[0]["reviewed_assertions"] == ["isHistorical"]
+    assert artifacts[0]["llm_returned_assertions"] == []
+
+
+def test_review_may_add_an_assertion(tmp_path: Path) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=True,
+                    type=EntityType.SYMPTOM,
+                    assertions=[Assertion.NEGATED],
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho")
+    proposal = SpanProposal(
+        start=0, end=2, text="ho", type=EntityType.SYMPTOM, source="test"
+    )
+
+    _, assertions, _ = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): ["isHistorical"]},
+        warnings=[],
+    )
+
+    # Canonical order is isNegated, isFamily, isHistorical.
+    assert assertions == {(0, 2): ["isNegated", "isHistorical"]}
+
+
+def test_retyping_to_a_lab_entity_clears_assertions(tmp_path: Path) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=True,
+                    type=EntityType.TEST_RESULT,
+                    assertions=[],
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho")
+    proposal = SpanProposal(
+        start=0, end=2, text="ho", type=EntityType.SYMPTOM, source="test"
+    )
+
+    _, assertions, _ = pipeline._review_entities(
+        document,
+        [proposal],
+        {(0, 2): ["isHistorical"]},
+        warnings=[],
+    )
+
+    assert assertions == {(0, 2): []}
+
+
+def test_rerank_accepts_catalog_validated_llm_code(tmp_path: Path) -> None:
+    from clinical_nlp.icd_linking.index import ICDConcept
+
+    index = ICDIndex({"M30.3": ICDConcept(code="M30.3", names=("Kawasaki",))})
+    pipeline = ClinicalPipeline(
+        PipelineConfig(),
+        index,
+        RxNormIndex(tmp_path / "rx.json", use_api=False),
+        NoopNERBackend(),
+        FakeLLM(
+            BatchCandidateSelectionResponse(
+                selections=[
+                    CandidateSelection(
+                        position=(0, 8), candidates=["M30.3"], confidence=0.9
+                    )
+                ]
+            )
+        ),
+    )
+    document = Document(id="x", text="Kawasaki")
+    proposal = SpanProposal(
+        start=0, end=8, text="Kawasaki", type=EntityType.DIAGNOSIS, source="test"
+    )
+    # Retrieval surfaced only a wrong code; the model supplies the right one.
+    retrieved = [LinkCandidate(identifier="B05", name="Sởi", score=0.52)]
+
+    selected = pipeline._batch_rerank(
+        LLMTask.ICD_RERANK, document, [(proposal, retrieved)], 3
+    )
+
+    assert [row.identifier for row in selected[(0, 8)]] == ["M30.3"]
+    assert selected[(0, 8)][0].retrieval_sources == ["llm_catalog_proposal"]
+
+
+def test_rerank_still_rejects_a_code_absent_from_the_catalog(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        BatchCandidateSelectionResponse(
+            selections=[
+                CandidateSelection(
+                    position=(0, 8), candidates=["ZZ9.9"], confidence=0.9
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="Kawasaki")
+    proposal = SpanProposal(
+        start=0, end=8, text="Kawasaki", type=EntityType.DIAGNOSIS, source="test"
+    )
+    retrieved = [LinkCandidate(identifier="B05", name="Sởi", score=0.52)]
+
+    selected = pipeline._batch_rerank(
+        LLMTask.ICD_RERANK, document, [(proposal, retrieved)], 3
+    )
+
+    assert selected[(0, 8)] == []
+
+
+def test_candidate_fallback_never_emits_empty_when_retrieval_found_something() -> None:
+    retrieved = [
+        LinkCandidate(identifier="A82.1", name="Bệnh dại", score=0.61),
+        LinkCandidate(identifier="A82", name="Bệnh dại", score=0.59),
+    ]
+
+    assert ClinicalPipeline._candidate_ids_with_fallback([], retrieved, 3) == [
+        "A82.1"
+    ]
+    # A real selection is respected and capped at the configured limit.
+    assert ClinicalPipeline._candidate_ids_with_fallback(
+        retrieved, retrieved, 1
+    ) == ["A82.1"]
+    # Nothing retrieved and nothing selected stays empty.
+    assert ClinicalPipeline._candidate_ids_with_fallback([], [], 3) == []

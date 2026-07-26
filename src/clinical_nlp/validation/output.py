@@ -5,6 +5,7 @@ from pathlib import Path
 
 from clinical_nlp.atomic import atomic_write_json
 from clinical_nlp.schemas import Document, Entity
+from clinical_nlp.text import is_masked_span
 
 
 def validate_entities(document: Document, entities: list[Entity]) -> None:
@@ -16,6 +17,8 @@ def validate_entities(document: Document, entities: list[Entity]) -> None:
             raise ValueError(f"overlap or unsorted entity at {entity.position}")
         if document.text[start:end] != entity.text:
             raise ValueError(f"substring mismatch at {entity.position}")
+        if is_masked_span(entity.text):
+            raise ValueError(f"masked placeholder entity at {entity.position}")
         key = (start, end, entity.type.value)
         if key in seen:
             raise ValueError(f"duplicate entity at {entity.position}")

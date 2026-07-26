@@ -5,10 +5,16 @@ import re
 from clinical_nlp.schemas import Assertion, EntityType, SpanProposal
 
 
+# The cue need not sit immediately before the mention: "không được phát hiện
+# thiếu men G6PD" negates across an intervening verb phrase. The window is
+# deliberately tighter than HISTORICAL_RE's because negation scope is shorter,
+# and the caller has already trimmed to the clause and past any contrast marker.
 NEGATION_RE = re.compile(
     r"(?i)(?:không\s+ghi\s+nhận|không\s+có|không|phủ\s+nhận|"
     r"chưa\s+thấy|chưa\s+phát\s+hiện|âm\s+tính\s+với|"
-    r"without|denies|no\s+evidence\s+of)\s*$"
+    r"without|denies|no\s+evidence\s+of)"
+    r"(?:\s+(?:được|bị|thấy|phát\s+hiện|ghi\s+nhận|có\s+dấu\s+hiệu|"
+    r"biểu\s+hiện|triệu\s+chứng\s+của)){0,3}\s*$"
 )
 HISTORICAL_RE = re.compile(
     r"(?i)(?:tiền\s+sử|tiền\s+căn|trước\s+đây|đã\s+từng|có\s+lần|"
@@ -30,11 +36,25 @@ CONTRAST_RE = re.compile(r"(?i)\b(?:nhưng|tuy\s+nhiên|however|but)\b")
 CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;\n]")
 
 
+# The corpus writes headings as outline items: "1.  Tiền sử bệnh", "- Tiền sử
+# Thuyên tắc phổi". Stripping the marker is what lets the prefix rules below fire.
+LIST_MARKER_RE = re.compile(r"^(?:\d+\s*[.)]|[-–•*+]|[a-z]\s*[.)])\s*")
+
+
+def _normalize_heading(line: str) -> str:
+    normalized = line.strip().casefold()
+    while True:
+        stripped = LIST_MARKER_RE.sub("", normalized).strip()
+        if stripped == normalized:
+            return normalized
+        normalized = stripped
+
+
 def _section_at(text: str, position: int) -> str | None:
     prefix = text[:position]
     lines = prefix.splitlines()
     for line in reversed(lines[-12:]):
-        normalized = line.strip().casefold()
+        normalized = _normalize_heading(line)
         if not normalized:
             continue
         if "tiền sử bệnh hiện tại" in normalized or "bệnh sử hiện tại" in normalized:
@@ -47,7 +67,10 @@ def _section_at(text: str, position: int) -> str | None:
             return "past_history"
         if "thuốc đang dùng" in normalized:
             return "current_medication"
-        if "chẩn đoán" in normalized:
+        # Heading-shaped only. "được chẩn đoán đái tháo đường năm 2019" is prose,
+        # and matching it here would end the scan before reaching the real
+        # heading above it.
+        if normalized.startswith("chẩn đoán"):
             return "diagnosis"
     return None
 

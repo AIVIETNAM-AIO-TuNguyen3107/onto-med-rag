@@ -340,8 +340,18 @@ def test_exact_linking_threshold_and_normalized_deduplication(
     assert llm.calls == []
 
 
-def test_weak_links_become_empty_instead_of_hallucinated(tmp_path: Path) -> None:
-    pipeline = _pipeline(tmp_path)
+def test_weak_icd_links_escalate_instead_of_silently_emptying(
+    tmp_path: Path,
+) -> None:
+    # Retrieval scores nothing above threshold for real diagnoses such as
+    # 'Kawasaki'. Deciding empty here would never consult the one component
+    # that knows the code, so the mention is escalated instead. Hallucination
+    # is still impossible: a proposed code must exist in the catalog.
+    response = BatchCandidateSelectionResponse(
+        selections=[CandidateSelection(position=(0, 5), candidates=[])]
+    )
+    llm = FakeLLM([response])
+    pipeline = _pipeline(tmp_path, llm)
     proposal = _proposal("mơ hồ")
 
     selected, decisions = pipeline._select_terminology(
@@ -349,6 +359,26 @@ def test_weak_links_become_empty_instead_of_hallucinated(tmp_path: Path) -> None
         Document(id="1", text="mơ hồ"),
         [(proposal, [_candidate("A00", 0.4)])],
         limit=3,
+        checkpoint_dir=None,
+    )
+
+    assert len(llm.calls) == 1
+    assert selected[(0, len(proposal.text))] == []
+    assert decisions[(0, len(proposal.text))]["decision_source"] == "llm"
+
+
+def test_weak_rxnorm_links_still_become_empty_without_an_llm_call(
+    tmp_path: Path,
+) -> None:
+    # RxNorm keeps the closed-set rule; opaque numerics invite hallucination.
+    pipeline = _pipeline(tmp_path)
+    proposal = _proposal("mơ hồ")
+
+    selected, decisions = pipeline._select_terminology(
+        LLMTask.RXNORM_RERANK,
+        Document(id="1", text="mơ hồ"),
+        [(proposal, [_candidate("12345", 0.2)])],
+        limit=1,
         checkpoint_dir=None,
     )
 

@@ -33,7 +33,12 @@ from clinical_nlp.schemas import (
     LinkCandidate,
     SpanProposal,
 )
-from clinical_nlp.text import chunk_document, find_occurrence
+from clinical_nlp.text import (
+    chunk_document,
+    find_occurrence,
+    find_occurrence_relaxed,
+    is_masked_span,
+)
 from clinical_nlp.validation import validate_entities
 
 
@@ -60,6 +65,23 @@ SOURCE_INDEPENDENT_NON_ENTITIES = {
     "đậu tằm",
     "nhận xét",
     "hiến máu",
+    # Structural section labels. 67 of the 100 inputs use this outline format,
+    # and granular span selection promotes the headings themselves unless they
+    # are excluded here.
+    "tiền sử",
+    "tiền sử bệnh",
+    "bệnh sử",
+    "bệnh sử hiện tại",
+    "tiền sử bệnh hiện tại",
+    "lý do nhập viện",
+    "kết quả xét nghiệm",
+    "triệu chứng khi nhập viện",
+    "khởi phát triệu chứng",
+    "thời điểm khởi phát triệu chứng",
+    "các thủ thuật đã thực hiện",
+    "thủ thuật đã thực hiện",
+    "đánh giá tại bệnh viện",
+    "chẩn đoán hình ảnh",
 }
 QUALITATIVE_RESULT_RE = re.compile(r"(?i)^(?:âm\s+tính|dương\s+tính)$")
 _RESULT_UNIT = (
@@ -201,7 +223,16 @@ class ClinicalPipeline:
                     raise
                 warnings.append(f"LLM recovery unavailable: {type(exc).__name__}: {exc}")
 
-        merged = merge_proposals(rule_proposals + ner_proposals + llm_proposals)
+        candidates = rule_proposals + ner_proposals + llm_proposals
+        # Drop redaction placeholders before selection so they cannot displace a
+        # real span that overlaps them.
+        unmasked = [row for row in candidates if not is_masked_span(row.text)]
+        if len(unmasked) != len(candidates):
+            warnings.append(
+                f"dropped {len(candidates) - len(unmasked)} masked "
+                "placeholder proposal(s)"
+            )
+        merged = merge_proposals(unmasked)
         merged, filter_decisions = self._filter_merged_proposals(merged)
         assertion_by_position: dict[tuple[int, int], list[str]] = {}
         for proposal in merged:
@@ -322,18 +353,31 @@ class ClinicalPipeline:
                 )
             )
 
+        icd_retrieved = {
+            (proposal.start, proposal.end): candidates
+            for proposal, candidates in icd_entries
+        }
+        rxnorm_retrieved = {
+            (proposal.start, proposal.end): candidates
+            for proposal, candidates in rxnorm_entries
+        }
+
         entities: list[Entity] = []
         for proposal in merged:
             position = (proposal.start, proposal.end)
             candidate_ids: list[str] | None = None
             if proposal.type == EntityType.DIAGNOSIS:
-                candidate_ids = [
-                    row.identifier for row in selected_icd.get(position, [])
-                ]
+                candidate_ids = self._candidate_ids_with_fallback(
+                    selected_icd.get(position, []),
+                    icd_retrieved.get(position, []),
+                    self.config.linking.icd_max_candidates,
+                )
             elif proposal.type == EntityType.MEDICATION:
-                candidate_ids = [
-                    row.identifier for row in selected_rxnorm.get(position, [])
-                ]
+                candidate_ids = self._candidate_ids_with_fallback(
+                    selected_rxnorm.get(position, []),
+                    rxnorm_retrieved.get(position, []),
+                    self.config.linking.rxnorm_max_candidates,
+                )
             entities.append(
                 Entity(
                     text=proposal.text,
@@ -591,11 +635,17 @@ class ClinicalPipeline:
                 reviewed_type = EntityType(decision.type)
                 unsupported_returned_type = False
             except ValueError:
+                # A mangled label (observed: 'CHָN_ĐOÁN' for 'CHẨN_ĐOÁN') must not
+                # abort the document when the model still wants the span kept.
+                recovered_type = self._closest_entity_type(decision.type)
                 if decision.keep:
-                    raise ValueError(
-                        "LLM kept an entity with an unsupported entity type"
-                    )
-                reviewed_type = proposal.type
+                    if recovered_type is None:
+                        raise ValueError(
+                            "LLM kept an entity with an unsupported entity type"
+                        )
+                    reviewed_type = recovered_type
+                else:
+                    reviewed_type = proposal.type
                 unsupported_returned_type = True
                 unsupported_rejected_types += 1
             if reviewed_type not in eligible and decision.assertions:
@@ -610,7 +660,13 @@ class ClinicalPipeline:
                     "returned_type": decision.type,
                     "reviewed_type": reviewed_type.value,
                     "unsupported_returned_type": unsupported_returned_type,
-                    "reviewed_assertions": [
+                    "reviewed_assertions": self._merged_assertions(
+                        initial_assertions[position],
+                        decision.assertions,
+                        reviewed_type,
+                        eligible,
+                    ),
+                    "llm_returned_assertions": [
                         value.value for value in decision.assertions
                     ],
                     "batch_index": batch_by_position[position],
@@ -639,15 +695,37 @@ class ClinicalPipeline:
                     }
                 )
             )
-            reviewed_assertions[position] = [
-                value.value for value in decision.assertions
-            ]
+            reviewed_assertions[position] = self._merged_assertions(
+                initial_assertions[position],
+                decision.assertions,
+                reviewed_type,
+                eligible,
+            )
         if unsupported_rejected_types:
             warnings.append(
                 "LLM review rejected "
                 f"{unsupported_rejected_types} row(s) using unsupported type labels"
             )
         return reviewed, reviewed_assertions, artifacts
+
+    @staticmethod
+    def _merged_assertions(
+        rule_assertions: list[str],
+        llm_assertions: list[Assertion],
+        reviewed_type: EntityType,
+        eligible: set[EntityType],
+    ) -> list[str]:
+        """Union rule-detected and model-returned assertions.
+
+        The model may add an assertion but may not silently drop one: an empty
+        list is its default output shape, not evidence against a deterministic
+        section rule. Retyping to a lab entity still clears them, because those
+        types may not carry assertions at all.
+        """
+        if reviewed_type not in eligible:
+            return []
+        merged = set(rule_assertions) | {value.value for value in llm_assertions}
+        return [row.value for row in Assertion if row.value in merged]
 
     def _review_batch(
         self,
@@ -690,7 +768,11 @@ class ClinicalPipeline:
                         "Assertions may only be isNegated, isFamily, isHistorical "
                         "and are permitted only for symptoms, diagnoses, and "
                         "medications. Family assertions require contextual evidence, "
-                        "not merely a kinship word."
+                        "not merely a kinship word. "
+                        "The supplied assertions were already detected from section "
+                        "headings and negation cues; repeat every one you agree with "
+                        "and add any the context supports. Omitting a supplied "
+                        "assertion does not remove it."
                     ),
                 },
                 {
@@ -699,7 +781,8 @@ class ClinicalPipeline:
                         "ENTITIES_WITH_LOCAL_CONTEXT:\n"
                         f"{json.dumps(supplied, ensure_ascii=False)}\n\n"
                         'Return {"entities":[{"position":[start,end],'
-                        '"keep":true,"type":"ALLOWED_TYPE","assertions":[]}]}.'
+                        '"keep":true,"type":"ALLOWED_TYPE",'
+                        '"assertions":["isHistorical"]}]}.'
                     ),
                 },
             ],
@@ -765,10 +848,14 @@ class ClinicalPipeline:
             (proposal.start, proposal.end): []
             for proposal, _ in entries
         }
+        # Retrieval returns nothing at all for some real diagnoses ('amyloidosis'
+        # against a Vietnamese index). Those still go to the ICD reranker so it
+        # can supply a catalog-validated code; without this they are guaranteed
+        # an empty candidate list, which scores zero.
         with_candidates = [
             (proposal, candidates)
             for proposal, candidates in entries
-            if candidates
+            if candidates or task == LLMTask.ICD_RERANK
         ]
         if not with_candidates:
             return selected
@@ -809,7 +896,7 @@ class ClinicalPipeline:
                 response = None
                 error = f"structured response failure: {exc}"
             else:
-                error = self._rerank_response_error(batch, response, limit)
+                error = self._rerank_response_error(task, batch, response, limit)
             if error is not None and self.config.llm.decision_retries:
                 try:
                     response = self._rerank_batch(
@@ -826,7 +913,7 @@ class ClinicalPipeline:
                     response = None
                     error = f"structured response failure: {exc}"
                 else:
-                    error = self._rerank_response_error(batch, response, limit)
+                    error = self._rerank_response_error(task, batch, response, limit)
             if error is not None:
                 return (
                     batch_index,
@@ -845,9 +932,14 @@ class ClinicalPipeline:
             for row in rows:
                 position = tuple(row.position)
                 allowed = candidates_by_position[position]
-                selected[position] = [
-                    allowed[identifier] for identifier in row.candidates
-                ]
+                chosen: list[LinkCandidate] = []
+                for identifier in row.candidates:
+                    candidate = allowed.get(identifier)
+                    if candidate is None and task == LLMTask.ICD_RERANK:
+                        candidate = self._proposed_icd_candidate(identifier)
+                    if candidate is not None:
+                        chosen.append(candidate)
+                selected[position] = chosen
         return selected
 
     def _rerank_batch(
@@ -871,6 +963,23 @@ class ClinicalPipeline:
             "For RxNorm, prefer generic SCD when ingredient, strength, and form "
             "are explicit; choose SBD only for an explicit brand; use IN when "
             "only the ingredient is supported. Never assume missing details."
+        )
+        # Retrieval is string-similarity based and returns nothing at all for
+        # some common diagnoses ('Kawasaki', 'Tiểu đường'). The ICD reranker may
+        # therefore supply a code it knows; membership in the catalog is
+        # verified host-side, so a non-existent code is rejected. RxNorm keeps
+        # the closed-set rule because its identifiers are opaque numerics.
+        sourcing = (
+            "Prefer a supplied candidate when one fits. If none fits, you may "
+            "supply the correct ICD-10 code from your own knowledge; it is "
+            "checked against the official catalog and discarded if invalid. "
+            "Return an empty list only when the mention is not a codable "
+            "diagnosis."
+            if task == LLMTask.ICD_RERANK
+            else
+            "Never invent or modify an identifier. Every returned ID must "
+            "appear in the candidates array for that same position. If the "
+            "clinically best ID is absent, return an empty candidates list."
         )
         payload = [
             {
@@ -897,13 +1006,9 @@ class ClinicalPipeline:
                 {
                     "role": "system",
                     "content": (
-                        "Rerank only supplied terminology candidates. Think "
-                        "carefully, then return JSON only. Never invent or modify "
-                        f"an identifier. Return at most {limit} IDs per position. "
-                        "Every returned ID must appear in the candidates array for "
-                        "that same position. If the clinically best ID is absent, "
-                        "return an empty candidates list for that position. "
-                        f"{policy}"
+                        "Rank terminology candidates for each mention. Think "
+                        "carefully, then return JSON only. Return at most "
+                        f"{limit} IDs per position. {sourcing} {policy}"
                     ),
                 },
                 {
@@ -931,7 +1036,44 @@ class ClinicalPipeline:
         )
 
     @staticmethod
+    def _candidate_ids_with_fallback(
+        selected: list[LinkCandidate],
+        retrieved: list[LinkCandidate],
+        limit: int,
+    ) -> list[str]:
+        """Never emit an empty candidate list when retrieval found something.
+
+        Jaccard scores an empty prediction against a non-empty gold as zero, so
+        a discarded best guess is worth exactly as much as no guess at all. When
+        the reranker declines to choose, fall back to the top retrieval hit.
+        """
+        if selected:
+            return [row.identifier for row in selected[:limit]]
+        return [row.identifier for row in retrieved[:1]]
+
+    def _proposed_icd_candidate(self, identifier: str) -> LinkCandidate | None:
+        """Accept a model-supplied ICD code that exists in the catalog.
+
+        Retrieval is string-similarity based and genuinely fails on some common
+        diagnoses -- 'bệnh Kawasaki' returns measles and Chagas, never M30.3.
+        Validating membership rather than provenance lets the model supply the
+        code it knows while still making invention impossible. Deliberately not
+        extended to RxNorm, whose identifiers are opaque numerics.
+        """
+        concept = self.icd_index.concepts.get(identifier)
+        if concept is None:
+            return None
+        return LinkCandidate(
+            identifier=identifier,
+            name=concept.names[0] if concept.names else identifier,
+            terminology_type="ICD10",
+            score=0.60,
+            retrieval_sources=["llm_catalog_proposal"],
+        )
+
     def _rerank_response_error(
+        self,
+        task: LLMTask,
         batch: list[tuple[SpanProposal, list[LinkCandidate]]],
         response: BatchCandidateSelectionResponse,
         limit: int,
@@ -960,10 +1102,15 @@ class ClinicalPipeline:
                 or len(row.candidates) != len(set(row.candidates))
             ):
                 return "too many or duplicate candidate IDs"
-            if any(
-                identifier not in expected[tuple(row.position)]
-                for identifier in row.candidates
-            ):
+            allowed = expected[tuple(row.position)]
+            for identifier in row.candidates:
+                if identifier in allowed:
+                    continue
+                if (
+                    task == LLMTask.ICD_RERANK
+                    and self._proposed_icd_candidate(identifier) is not None
+                ):
+                    continue
                 return "invented a terminology candidate ID"
         return None
 
@@ -1131,6 +1278,17 @@ class ClinicalPipeline:
                         row.occurrence,
                     )
                 except ValueError:
+                    try:
+                        # The model often reproduces a mention with different
+                        # internal spacing; offsets still come from the chunk.
+                        relative_start, relative_end = find_occurrence_relaxed(
+                            chunk.text,
+                            row.text,
+                            row.occurrence,
+                        )
+                    except ValueError:
+                        relative_start = relative_end = -1
+                if relative_start < 0:
                     missing_substrings += 1
                     audit.append(
                         {
@@ -1395,9 +1553,13 @@ class ClinicalPipeline:
             reasons.append("low_confidence_gliner_only")
         if proposal.evidence.get("type_conflict"):
             reasons.append("type_conflict")
-        if initial_assertions:
-            reasons.append("assertion_rule")
-        elif self.assertions.has_context_cue(document.text, proposal):
+        if not initial_assertions and self.assertions.has_context_cue(
+            document.text,
+            proposal,
+        ):
+            # A cue with no rule hit is worth adjudicating. A rule hit is not:
+            # review can only add assertions now, and the deterministic section
+            # rules are the stronger signal.
             reasons.append("nearby_assertion_cue")
         if proposal.type == EntityType.MEDICATION:
             structured_sources = {
@@ -1477,9 +1639,15 @@ class ClinicalPipeline:
 
     def _automatic_candidate_selection(
         self,
+        task: LLMTask,
         candidates: list[LinkCandidate],
     ) -> tuple[list[str] | None, str]:
         if not candidates:
+            if task == LLMTask.ICD_RERANK:
+                # Retrieval finds nothing for 'Kawasaki' or 'Tiểu đường', and
+                # deciding empty here means never asking the one component that
+                # knows the code. Escalate so the reranker can propose one.
+                return None, "no_candidate_escalated_to_llm"
             return [], "empty_after_threshold"
         top = candidates[0]
         if (
@@ -1538,7 +1706,10 @@ class ClinicalPipeline:
         ] = {}
         for grouped_entries in groups.values():
             representative, eligible = grouped_entries[0]
-            candidate_ids, reason = self._automatic_candidate_selection(eligible)
+            candidate_ids, reason = self._automatic_candidate_selection(
+                task,
+                eligible,
+            )
             if candidate_ids is None:
                 ambiguous_representatives.append((representative, eligible))
                 ambiguous_groups[

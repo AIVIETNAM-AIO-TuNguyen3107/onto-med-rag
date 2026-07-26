@@ -8,7 +8,12 @@ from clinical_nlp.schemas import (
     Entity,
     EntityType,
 )
-from clinical_nlp.text import chunk_document, find_occurrence
+from clinical_nlp.text import (
+    chunk_document,
+    find_occurrence,
+    find_occurrence_relaxed,
+    is_masked_span,
+)
 from clinical_nlp.validation import validate_entities, validate_output_directory
 
 
@@ -145,3 +150,46 @@ def test_medication_candidates_are_numeric_rxnorm_identifier_strings() -> None:
             candidates=["RX-308135"],
             position=(0, 10),
         )
+
+
+def test_masked_placeholder_spans_are_detected() -> None:
+    assert is_masked_span("************")
+    assert is_masked_span("*******")
+    assert is_masked_span("** **")
+    # Real text alongside an asterisk is a genuine span.
+    assert not is_masked_span("aspirin*")
+    assert not is_masked_span("aspirin")
+    assert not is_masked_span("")
+
+
+def test_masked_placeholder_entity_is_rejected_by_validation() -> None:
+    text = "Bác sĩ kê đơn thuốc ************ mỗi tối."
+    document = Document(id="1", text=text)
+    start = text.index("*")
+    entity = Entity(
+        text=text[start : start + 12],
+        type=EntityType.MEDICATION,
+        candidates=[],
+        position=(start, start + 12),
+    )
+    with pytest.raises(ValueError, match="masked placeholder"):
+        validate_entities(document, [entity])
+
+
+def test_relaxed_occurrence_tolerates_whitespace_differences() -> None:
+    text = "Bệnh nhân bị  đau   bụng dữ dội\nvà sốt cao."
+    # The model reproduces the mention with single spaces; the source has runs.
+    start, end = find_occurrence_relaxed(text, "đau bụng dữ dội")
+    assert text[start:end] == "đau   bụng dữ dội"
+    # Offsets still index the original text exactly.
+    with pytest.raises(ValueError):
+        find_occurrence(text, "đau bụng dữ dội")
+
+
+def test_relaxed_occurrence_respects_occurrence_index() -> None:
+    text = "sốt  cao rồi sốt cao lần nữa"
+    first = find_occurrence_relaxed(text, "sốt cao", 1)
+    second = find_occurrence_relaxed(text, "sốt cao", 2)
+    assert text[first[0] : first[1]] == "sốt  cao"
+    assert text[second[0] : second[1]] == "sốt cao"
+    assert second[0] > first[0]

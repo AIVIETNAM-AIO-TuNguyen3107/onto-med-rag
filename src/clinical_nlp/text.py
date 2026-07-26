@@ -8,6 +8,15 @@ from .schemas import Chunk, Document
 
 BOUNDARY_RE = re.compile(r"(?:\n\s*\n|\n|(?<=[.!?])\s+)")
 
+# Source documents redact drug names as runs of asterisks. Such a span can never
+# match a gold entity, so it is a pure insertion plus a guaranteed linking miss.
+MASKED_SPAN_RE = re.compile(r"\A[\s*]*\*[\s*]*\Z")
+
+
+def is_masked_span(text: str) -> bool:
+    """True when a span carries no content beyond redaction asterisks."""
+    return bool(MASKED_SPAN_RE.match(text))
+
 
 def chunk_document(
     document: Document,
@@ -59,6 +68,59 @@ def validate_chunk(document: Document, chunk: Chunk) -> None:
         raise ValueError("chunk belongs to another document")
     if document.text[chunk.start : chunk.end] != chunk.text:
         raise ValueError("chunk is not an exact original-text view")
+
+
+def _relaxed_view(text: str) -> tuple[str, list[int]]:
+    """NFD-normalise and collapse whitespace, mapping back to original indices."""
+    characters: list[str] = []
+    original_indices: list[int] = []
+    in_whitespace = False
+    for original_index, character in enumerate(text):
+        if character.isspace():
+            if not in_whitespace:
+                characters.append(" ")
+                original_indices.append(original_index)
+                in_whitespace = True
+            continue
+        in_whitespace = False
+        for normalized_character in unicodedata.normalize("NFD", character):
+            characters.append(normalized_character)
+            original_indices.append(original_index)
+    return "".join(characters), original_indices
+
+
+def find_occurrence_relaxed(
+    text: str,
+    substring: str,
+    occurrence: int = 1,
+) -> tuple[int, int]:
+    """Locate a span while tolerating whitespace differences.
+
+    A fallback for when a model reproduces a mention with different internal
+    spacing than the source. Offsets index the original text, so the caller's
+    exact-substring invariant still holds against the slice it takes back.
+    """
+    if occurrence < 1:
+        raise ValueError("occurrence is one-based")
+    relaxed_text, original_indices = _relaxed_view(text)
+    relaxed_substring, _ = _relaxed_view(substring)
+    relaxed_substring = relaxed_substring.strip()
+    if not relaxed_substring:
+        raise ValueError("substring must not be empty")
+    cursor = 0
+    found = 0
+    while True:
+        start = relaxed_text.find(relaxed_substring, cursor)
+        if start < 0:
+            raise ValueError("substring occurrence not found")
+        found += 1
+        if found == occurrence:
+            end = start + len(relaxed_substring)
+            return (
+                original_indices[start],
+                original_indices[end - 1] + 1,
+            )
+        cursor = start + 1
 
 
 def find_occurrence(text: str, substring: str, occurrence: int = 1) -> tuple[int, int]:
