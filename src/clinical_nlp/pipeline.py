@@ -36,7 +36,7 @@ from clinical_nlp.text import chunk_document, find_occurrence
 from clinical_nlp.validation import validate_entities
 
 
-RECOVERY_MAX_NEW_TOKENS = 1536
+RECOVERY_MAX_NEW_TOKENS = 4096
 PREFLIGHT_MAX_NEW_TOKENS = 512
 REVIEW_MAX_NEW_TOKENS = 2048
 RERANK_MAX_NEW_TOKENS = 1536
@@ -50,22 +50,15 @@ POST_MERGE_NON_MEDICATIONS = {
     "thuốc nam",
     "thuốc đông y",
 }
-POST_MERGE_NON_ENTITIES = {
+SOURCE_INDEPENDENT_NON_ENTITIES = {
     "dấu hiệu",
     "triệu chứng",
-    "xét nghiệm",
-    "xét nghiệm máu",
-    "xét nghiệm chuyên sâu",
-    "sàng lọc",
-    "bệnh bẩm sinh",
     "nhiễm sắc thể x",
-    "g6pd",
     "xq28",
     "máu khô",
     "đậu tằm",
     "nhận xét",
     "hiến máu",
-    "glucose 6 phosphate dehydrogenase",
 }
 QUALITATIVE_RESULT_RE = re.compile(r"(?i)^(?:âm\s+tính|dương\s+tính)$")
 _RESULT_UNIT = (
@@ -386,7 +379,7 @@ class ClinicalPipeline:
                 "thinking": self.config.llm.thinking,
                 "review_mode": self.config.run.llm_review_mode,
                 "task_reasoning": {
-                    "entity_recovery": False,
+                    "entity_recovery": True,
                     "entity_review": self.config.llm.reasoning_enabled,
                     "terminology_rerank": self.config.llm.reasoning_enabled,
                 },
@@ -682,8 +675,13 @@ class ClinicalPipeline:
                         "Review supplied Vietnamese clinical entity spans. "
                         "Think carefully, then return JSON only. Positions are "
                         "immutable. Return exactly one decision for every supplied "
-                        "position. Set keep=false for generic or non-clinical false "
-                        "positives. Use only the five allowed entity types. "
+                        "position. Prefer keep=true for any explicit, plausible "
+                        "mention of one of the five allowed clinical entity types. "
+                        "Set keep=false only for clearly generic, non-clinical, or "
+                        "unsupported spans. Preserve the supplied type unless the "
+                        "local context strongly supports a different allowed type; "
+                        "never retype speculatively. Use only the five allowed "
+                        "entity types. "
                         "Assertions may only be isNegated, isFamily, isHistorical "
                         "and are permitted only for symptoms, diagnoses, and "
                         "medications. Family assertions require contextual evidence, "
@@ -982,10 +980,30 @@ class ClinicalPipeline:
         def recovery_job(
             chunk: Chunk,
         ) -> tuple[Chunk, EntityRecoveryResponse, dict[str, Any] | None]:
+            chunk_existing_by_key: dict[
+                tuple[str, int, str],
+                dict[str, str | int],
+            ] = {}
+            for row in existing:
+                if row.start < chunk.start or row.end > chunk.end:
+                    continue
+                occurrence = self._occurrence_at(
+                    chunk.text,
+                    row.text,
+                    row.start - chunk.start,
+                )
+                key = (row.text, occurrence, row.type.value)
+                chunk_existing_by_key[key] = {
+                    "text": row.text,
+                    "occurrence": occurrence,
+                    "type": row.type.value,
+                }
             chunk_existing = [
-                {"text": row.text, "type": row.type.value}
-                for row in existing
-                if row.start >= chunk.start and row.end <= chunk.end
+                chunk_existing_by_key[key]
+                for key in sorted(
+                    chunk_existing_by_key,
+                    key=lambda value: (value[1], value[0], value[2]),
+                )
             ]
             try:
                 response = self._recover_chunk(
@@ -1144,7 +1162,7 @@ class ClinicalPipeline:
         self,
         document: Document,
         chunk: Chunk,
-        chunk_existing: list[dict[str, str]],
+        chunk_existing: list[dict[str, str | int]],
         checkpoint_dir: Path | None,
         *,
         strict: bool,
@@ -1165,9 +1183,13 @@ class ClinicalPipeline:
                 {
                     "role": "system",
                     "content": (
-                        "Exhaustively extract explicit clinical entities that "
-                        "are absent from EXISTING_ENTITIES. Copy text exactly. "
-                        "Never generate offsets or repeat an existing entity. "
+                        "Independently and exhaustively extract every explicit "
+                        "clinical entity mention in TEXT_CHUNK. First scan the "
+                        "entire chunk without using EXISTING_ENTITIES as an "
+                        "anchor. Then omit only exact text + occurrence + type "
+                        "triples already listed in EXISTING_ENTITIES; include "
+                        "another occurrence of the same text when it is not "
+                        "listed. Copy text exactly. Never generate offsets. "
                         "Return JSON only. Allowed types are TRIỆU_CHỨNG, "
                         "TÊN_XÉT_NGHIỆM, KẾT_QUẢ_XÉT_NGHIỆM, CHẨN_ĐOÁN, THUỐC. "
                         f"{quality_policy}"
@@ -1186,13 +1208,28 @@ class ClinicalPipeline:
             ],
             EntityRecoveryResponse,
             max_new_tokens=RECOVERY_MAX_NEW_TOKENS,
-            reasoning_enabled=False,
+            reasoning_enabled=not strict,
             call_id=(
                 f"{document.id}/recovery-{chunk.index:03d}"
                 + ("-quality-fallback" if strict else "")
             ),
             checkpoint_dir=checkpoint_dir,
         )
+
+    @staticmethod
+    def _occurrence_at(text: str, substring: str, start: int) -> int:
+        if text[start : start + len(substring)] != substring:
+            raise ValueError("span is not an exact substring at the supplied start")
+        occurrence = 0
+        cursor = 0
+        while True:
+            found = text.find(substring, cursor)
+            if found < 0 or found > start:
+                raise ValueError("span start is not a reconstructable occurrence")
+            occurrence += 1
+            if found == start:
+                return occurrence
+            cursor = found + len(substring)
 
     @staticmethod
     def _recovery_quality_error(
@@ -1223,7 +1260,7 @@ class ClinicalPipeline:
         for proposal in proposals:
             normalized = normalize_search(proposal.text)
             reject_reason: str | None = None
-            if normalized in POST_MERGE_NON_ENTITIES:
+            if normalized in SOURCE_INDEPENDENT_NON_ENTITIES:
                 reject_reason = "source_independent_non_entity_exclusion"
             elif proposal.type == EntityType.MEDICATION and (
                 normalized in POST_MERGE_NON_MEDICATIONS
@@ -1569,33 +1606,17 @@ class ClinicalPipeline:
     def _filter_ner_proposals(
         proposals: list[SpanProposal],
     ) -> list[SpanProposal]:
-        generic = {
-            "dấu hiệu",
-            "triệu chứng",
-            "xét nghiệm",
-            "xét nghiệm máu",
-            "sàng lọc",
-            "bệnh bẩm sinh",
-            "nhiễm sắc thể x",
-            "g6pd",
-        }
-        non_medications = {
-            "băng phiến",
-            "long não",
-            "thuốc",
-            "thuốc nam",
-            "thuốc đông y",
-        }
         kept: list[SpanProposal] = []
         for row in proposals:
-            normalized = row.text.casefold().strip()
-            if "\n" in row.text or normalized in generic:
-                continue
-            if row.type == EntityType.MEDICATION and normalized in non_medications:
+            normalized = normalize_search(row.text)
+            if (
+                "\n" in row.text
+                or normalized in SOURCE_INDEPENDENT_NON_ENTITIES
+            ):
                 continue
             if (
-                row.type == EntityType.TEST_NAME
-                and "glucose-6-phosphate dehydrogenase" in normalized
+                row.type == EntityType.MEDICATION
+                and normalized in POST_MERGE_NON_MEDICATIONS
             ):
                 continue
             kept.append(row)

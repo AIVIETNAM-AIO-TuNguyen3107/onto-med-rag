@@ -110,6 +110,42 @@ def test_entity_review_invalid_positions_preserve_original_entity(
     assert len(pipeline.llm_backend.calls) == 2
 
 
+def test_entity_review_prompt_is_recall_biased_and_type_conservative(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityReviewResponse(
+            entities=[
+                ReviewedEntity(
+                    position=(0, 2),
+                    keep=True,
+                    type=EntityType.SYMPTOM,
+                )
+            ]
+        ),
+    )
+    proposal = SpanProposal(
+        start=0,
+        end=2,
+        text="ho",
+        type=EntityType.SYMPTOM,
+        source="llm_recovery",
+    )
+
+    pipeline._review_entities(
+        Document(id="x", text="ho"),
+        [proposal],
+        {(0, 2): []},
+    )
+
+    prompt = pipeline.llm_backend.calls[0]["messages"][0]["content"]
+    assert "Prefer keep=true" in prompt
+    assert "only for clearly generic, non-clinical, or unsupported" in prompt
+    assert "Preserve the supplied type" in prompt
+    assert "never retype speculatively" in prompt
+
+
 def test_invalid_lab_assertions_preserve_original_entity(tmp_path: Path) -> None:
     pipeline = _pipeline(
         tmp_path,
@@ -354,7 +390,55 @@ def test_recovery_audits_unknown_types_and_uses_chunk_budget(
     ]
     assert audit[0]["reason"] == "unsupported_entity_type"
     assert "unsupported entity types" in warnings[0]
-    assert pipeline.llm_backend.calls[0]["max_new_tokens"] == 1536
+    assert pipeline.llm_backend.calls[0]["max_new_tokens"] == 4096
+    assert pipeline.llm_backend.calls[0]["reasoning_enabled"] is True
+    assert (
+        pipeline.model_metadata()["llm"]["task_reasoning"]["entity_recovery"]
+        is True
+    )
+
+
+def test_recovery_scans_independently_and_tracks_existing_occurrences(
+    tmp_path: Path,
+) -> None:
+    pipeline = _pipeline(
+        tmp_path,
+        EntityRecoveryResponse(
+            entities=[
+                RecoveredEntity(
+                    text="ho",
+                    occurrence=2,
+                    type=EntityType.SYMPTOM.value,
+                )
+            ]
+        ),
+    )
+    document = Document(id="x", text="ho rồi ho")
+    existing = SpanProposal(
+        start=0,
+        end=2,
+        text="ho",
+        type=EntityType.SYMPTOM,
+        source="gliner",
+    )
+    from clinical_nlp.text import chunk_document
+
+    proposals, _ = pipeline._recover_entities(
+        document,
+        chunk_document(document, max_chars=100, overlap_chars=10),
+        [existing],
+        [],
+    )
+
+    assert [(row.text, row.start, row.end) for row in proposals] == [
+        ("ho", 7, 9)
+    ]
+    system_prompt = pipeline.llm_backend.calls[0]["messages"][0]["content"]
+    user_prompt = pipeline.llm_backend.calls[0]["messages"][1]["content"]
+    assert "Independently and exhaustively" in system_prompt
+    assert "Never generate offsets" in system_prompt
+    assert '"occurrence": 1' in user_prompt
+    assert '"text": "ho"' in user_prompt
 
 
 def test_suspicious_recovery_chunk_retries_once_without_reasoning(
@@ -396,10 +480,9 @@ def test_suspicious_recovery_chunk_retries_once_without_reasoning(
     assert audit[0]["initial_row_count"] == 41
     assert "retried 1 suspicious" in warnings[0]
     assert len(pipeline.llm_backend.calls) == 2
-    assert all(
-        row["reasoning_enabled"] is False
-        for row in pipeline.llm_backend.calls
-    )
+    assert [
+        row["reasoning_enabled"] for row in pipeline.llm_backend.calls
+    ] == [True, False]
     assert pipeline.llm_backend.calls[1]["call_id"].endswith(
         "-quality-fallback"
     )

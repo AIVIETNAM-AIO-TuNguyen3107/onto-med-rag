@@ -139,16 +139,14 @@ def test_post_merge_medication_filter_is_source_independent(
 @pytest.mark.parametrize(
     "text,entity_type",
     [
+        ("dấu hiệu", EntityType.SYMPTOM),
+        ("triệu chứng", EntityType.SYMPTOM),
+        ("nhiễm sắc thể X", EntityType.DIAGNOSIS),
         ("Xq28", EntityType.TEST_NAME),
         ("máu khô", EntityType.TEST_RESULT),
-        ("xét nghiệm chuyên sâu", EntityType.TEST_NAME),
         ("đậu tằm", EntityType.SYMPTOM),
         ("nhận xét", EntityType.SYMPTOM),
         ("hiến máu", EntityType.DIAGNOSIS),
-        (
-            "Glucose-6-Phosphate Dehydrogenase",
-            EntityType.TEST_NAME,
-        ),
     ],
 )
 def test_post_merge_generic_non_entities_are_source_independent(
@@ -157,18 +155,52 @@ def test_post_merge_generic_non_entities_are_source_independent(
     entity_type: EntityType,
 ) -> None:
     pipeline = _pipeline(tmp_path)
+    proposal = _proposal(
+        text,
+        entity_type=entity_type,
+        source="gliner",
+    )
+    assert pipeline._filter_ner_proposals([proposal]) == []
     kept, audit = pipeline._filter_merged_proposals(
-        [
-            _proposal(
-                text,
-                entity_type=entity_type,
-                source="llm_recovery",
-            )
-        ]
+        [proposal]
     )
 
     assert kept == []
     assert audit[0]["reason"] == "source_independent_non_entity_exclusion"
+
+
+@pytest.mark.parametrize(
+    "text,entity_type",
+    [
+        ("xét nghiệm", EntityType.TEST_NAME),
+        ("xét nghiệm máu", EntityType.TEST_NAME),
+        ("xét nghiệm chuyên sâu", EntityType.TEST_NAME),
+        ("sàng lọc", EntityType.TEST_NAME),
+        ("bệnh bẩm sinh", EntityType.DIAGNOSIS),
+        ("G6PD", EntityType.TEST_NAME),
+        (
+            "Glucose-6-Phosphate Dehydrogenase",
+            EntityType.TEST_NAME,
+        ),
+    ],
+)
+def test_plausible_clinical_mentions_reach_review_from_both_filters(
+    tmp_path: Path,
+    text: str,
+    entity_type: EntityType,
+) -> None:
+    pipeline = _pipeline(tmp_path)
+    proposal = _proposal(
+        text,
+        entity_type=entity_type,
+        source="gliner",
+    )
+
+    assert pipeline._filter_ner_proposals([proposal]) == [proposal]
+    kept, audit = pipeline._filter_merged_proposals([proposal])
+
+    assert kept == [proposal]
+    assert audit == []
 
 
 def test_selective_uncertainty_gates(tmp_path: Path) -> None:
