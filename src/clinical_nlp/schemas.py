@@ -97,6 +97,13 @@ class Entity(BaseModel):
         linkable = self.type in {EntityType.DIAGNOSIS, EntityType.MEDICATION}
         if linkable and self.candidates is None:
             self.candidates = []
+        if self.type == EntityType.MEDICATION and any(
+            not candidate.isascii() or not candidate.isdigit()
+            for candidate in self.candidates or []
+        ):
+            raise ValueError(
+                "medication candidates must be numeric RxNorm identifiers"
+            )
         if not linkable:
             if self.candidates:
                 raise ValueError(

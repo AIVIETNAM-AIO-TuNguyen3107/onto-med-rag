@@ -107,3 +107,32 @@ def test_non_linkable_output_includes_empty_candidates_and_round_trips() -> None
         "position",
     }
     assert Entity.model_validate(payload) == entity
+
+
+def test_medication_candidates_are_numeric_rxnorm_identifier_strings() -> None:
+    entity = Entity(
+        text="amlodipine 10 mg po daily",
+        type=EntityType.MEDICATION,
+        candidates=["308135"],
+        assertions=[Assertion.HISTORICAL],
+        position=(58, 83),
+    )
+
+    assert entity.output_dict() == {
+        "text": "amlodipine 10 mg po daily",
+        "type": "THUỐC",
+        "candidates": ["308135"],
+        "assertions": ["isHistorical"],
+        "position": [58, 83],
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="medication candidates must be numeric RxNorm identifiers",
+    ):
+        Entity(
+            text="amlodipine",
+            type=EntityType.MEDICATION,
+            candidates=["RX-308135"],
+            position=(0, 10),
+        )
