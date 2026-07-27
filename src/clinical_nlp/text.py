@@ -129,13 +129,26 @@ def find_occurrence(text: str, substring: str, occurrence: int = 1) -> tuple[int
     if not substring:
         raise ValueError("substring must not be empty")
     normalized_text_parts: list[str] = []
-    original_index_by_normalized_index: list[int] = []
-    for original_index, character in enumerate(text):
-        normalized_character = unicodedata.normalize("NFD", character)
-        normalized_text_parts.append(normalized_character)
-        original_index_by_normalized_index.extend(
-            [original_index] * len(normalized_character)
+    original_start_by_normalized_index: list[int] = []
+    original_end_by_normalized_index: list[int] = []
+    original_start = 0
+    while original_start < len(text):
+        original_end = original_start + 1
+        while (
+            original_end < len(text)
+            and unicodedata.combining(text[original_end])
+        ):
+            original_end += 1
+        cluster = text[original_start:original_end]
+        normalized_cluster = unicodedata.normalize("NFD", cluster)
+        normalized_text_parts.append(normalized_cluster)
+        original_start_by_normalized_index.extend(
+            [original_start] * len(normalized_cluster)
         )
+        original_end_by_normalized_index.extend(
+            [original_end] * len(normalized_cluster)
+        )
+        original_start = original_end
     normalized_text = "".join(normalized_text_parts)
     normalized_substring = unicodedata.normalize("NFD", substring)
     cursor = 0
@@ -145,8 +158,8 @@ def find_occurrence(text: str, substring: str, occurrence: int = 1) -> tuple[int
         if start < 0:
             raise ValueError("substring occurrence not found")
         end = start + len(normalized_substring)
-        original_start = original_index_by_normalized_index[start]
-        original_end = original_index_by_normalized_index[end - 1] + 1
+        original_start = original_start_by_normalized_index[start]
+        original_end = original_end_by_normalized_index[end - 1]
         if (
             unicodedata.normalize("NFD", text[original_start:original_end])
             == normalized_substring

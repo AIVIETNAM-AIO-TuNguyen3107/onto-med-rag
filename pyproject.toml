@@ -28,6 +28,7 @@ test = ["pytest>=8"]
 
 [project.scripts]
 clinical-nlp = "clinical_nlp.cli:main"
+clinical-nlp-luna = "clinical_nlp.luna_extraction:main"
 clinical-nlp-variants = "clinical_nlp.submission_variants:main"
 
 [tool.setuptools.packages.find]
