@@ -8,7 +8,12 @@ from clinical_nlp.schemas import Document, Entity
 from clinical_nlp.text import is_masked_span
 
 
-def validate_entities(document: Document, entities: list[Entity]) -> None:
+def validate_entities(
+    document: Document,
+    entities: list[Entity],
+    *,
+    allow_masked: bool = False,
+) -> None:
     previous_end = -1
     seen: set[tuple[int, int, str]] = set()
     for entity in entities:
@@ -17,7 +22,7 @@ def validate_entities(document: Document, entities: list[Entity]) -> None:
             raise ValueError(f"overlap or unsorted entity at {entity.position}")
         if document.text[start:end] != entity.text:
             raise ValueError(f"substring mismatch at {entity.position}")
-        if is_masked_span(entity.text):
+        if not allow_masked and is_masked_span(entity.text):
             raise ValueError(f"masked placeholder entity at {entity.position}")
         key = (start, end, entity.type.value)
         if key in seen:
@@ -41,6 +46,8 @@ def validate_output_directory(
     output_dir: Path,
     input_dir: Path,
     expected_stems: set[str] | None = None,
+    *,
+    allow_masked: bool = False,
 ) -> None:
     input_stems = (
         expected_stems
@@ -67,4 +74,4 @@ def validate_output_directory(
             text=(input_dir / f"{path.stem}.txt").read_text("utf-8"),
         )
         entities = [Entity.model_validate(row) for row in payload]
-        validate_entities(document, entities)
+        validate_entities(document, entities, allow_masked=allow_masked)
