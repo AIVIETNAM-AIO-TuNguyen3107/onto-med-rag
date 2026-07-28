@@ -104,6 +104,16 @@ class Entity(BaseModel):
             raise ValueError(
                 "medication candidates must be numeric RxNorm identifiers"
             )
+        assertion_eligible = self.type in {
+            EntityType.DIAGNOSIS,
+            EntityType.MEDICATION,
+            EntityType.SYMPTOM,
+        }
+        if self.assertions and not assertion_eligible:
+            raise ValueError(
+                "assertions are only allowed for diagnoses, medications, "
+                "and symptoms"
+            )
         if not linkable:
             if self.candidates:
                 raise ValueError(
@@ -113,12 +123,18 @@ class Entity(BaseModel):
             self.candidates = None
         return self
 
-    def output_dict(self) -> dict[str, Any]:
+    def output_dict(
+        self,
+        *,
+        omit_nonlinkable_candidates: bool = False,
+    ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "text": self.text,
             "type": self.type.value,
-            "candidates": self.candidates or [],
         }
+        linkable = self.type in {EntityType.DIAGNOSIS, EntityType.MEDICATION}
+        if linkable or not omit_nonlinkable_candidates:
+            data["candidates"] = self.candidates or []
         data["assertions"] = [value.value for value in self.assertions]
         data["position"] = list(self.position)
         return data

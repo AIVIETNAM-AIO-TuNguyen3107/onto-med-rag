@@ -123,6 +123,33 @@ def test_non_linkable_output_includes_empty_candidates_and_round_trips() -> None
     assert Entity.model_validate(payload) == entity
 
 
+def test_non_linkable_output_can_omit_candidates_without_changing_default() -> None:
+    entity = Entity(
+        text="ho",
+        type=EntityType.SYMPTOM,
+        position=(0, 2),
+    )
+
+    strict_payload = entity.output_dict(omit_nonlinkable_candidates=True)
+
+    assert "candidates" not in strict_payload
+    assert strict_payload["assertions"] == []
+    assert entity.output_dict()["candidates"] == []
+
+
+def test_lab_entities_reject_non_empty_assertions() -> None:
+    with pytest.raises(
+        ValueError,
+        match="assertions are only allowed",
+    ):
+        Entity(
+            text="WBC",
+            type=EntityType.TEST_NAME,
+            assertions=[Assertion.HISTORICAL],
+            position=(0, 3),
+        )
+
+
 def test_medication_candidates_are_numeric_rxnorm_identifier_strings() -> None:
     entity = Entity(
         text="amlodipine 10 mg po daily",

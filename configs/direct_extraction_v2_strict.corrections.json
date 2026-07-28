@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "occurrence_overrides": [
+    {
+      "document_id": "7",
+      "text": "ói",
+      "type": "TRIỆU_CHỨNG",
+      "from_occurrence": 1,
+      "to_occurrence": 2,
+      "expected_position": [838, 840],
+      "rationale": "Occurrence 1 is the substring inside 'nói'; occurrence 2 is the standalone symptom in the source."
+    },
+    {
+      "document_id": "9",
+      "text": "ói",
+      "type": "TRIỆU_CHỨNG",
+      "from_occurrence": 1,
+      "to_occurrence": 2,
+      "expected_position": [838, 840],
+      "rationale": "Occurrence 1 is the substring inside 'nói'; occurrence 2 is the standalone symptom in the source."
+    }
+  ],
+  "candidate_overrides": [
+    {
+      "document_id": "16",
+      "text": "bumetanide 2mg iv",
+      "type": "THUỐC",
+      "position": [2178, 2195],
+      "candidates": ["1808"],
+      "rationale": "The explicit IV route contradicts the previous Oral Tablet code; use the route-neutral bumetanide ingredient."
+    },
+    {
+      "document_id": "16",
+      "text": "levofloxacin 750mg iv",
+      "type": "THUỐC",
+      "position": [2244, 2265],
+      "candidates": ["82122"],
+      "rationale": "The explicit IV route contradicts the previous Oral Tablet code; use the route-neutral levofloxacin ingredient."
+    },
+    {
+      "document_id": "31",
+      "text": "vô sinh thứ phát",
+      "type": "CHẨN_ĐOÁN",
+      "position": [643, 659],
+      "candidates": ["N46"],
+      "rationale": "The source discusses male infertility due to varicocele; N91.1 denotes secondary amenorrhea."
+    },
+    {
+      "document_id": "33",
+      "text": "80mg lasix iv",
+      "type": "THUỐC",
+      "position": [1934, 1947],
+      "candidates": ["202991"],
+      "rationale": "The explicit IV route contradicts the previous Oral Tablet code; use the route-neutral Lasix brand concept."
+    },
+    {
+      "document_id": "57",
+      "text": "iv lasix 40 mg once",
+      "type": "THUỐC",
+      "position": [1715, 1734],
+      "candidates": ["202991"],
+      "rationale": "The explicit IV route contradicts the previous Oral Tablet code; use the route-neutral Lasix brand concept."
+    },
+    {
+      "document_id": "58",
+      "text": "iv lasix 40 mg once",
+      "type": "THUỐC",
+      "position": [1694, 1713],
+      "candidates": ["202991"],
+      "rationale": "The explicit IV route contradicts the previous Oral Tablet code; use the route-neutral Lasix brand concept."
+    },
+    {
+      "document_id": "81",
+      "text": "tắc mạch do cục máu đông",
+      "type": "CHẨN_ĐOÁN",
+      "position": [1420, 1444],
+      "candidates": ["I82.9"],
+      "rationale": "The source describes a generic inherited clot risk in the child, not an obstetric embolism."
+    }
+  ]
+}
