@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+import re
+
+from clinical_nlp.schemas import Assertion, EntityType, SpanProposal
+
+
+# The cue need not sit immediately before the mention: "không được phát hiện
+# thiếu men G6PD" negates across an intervening verb phrase. The window is
+# deliberately tighter than HISTORICAL_RE's because negation scope is shorter,
+# and the caller has already trimmed to the clause and past any contrast marker.
+NEGATION_RE = re.compile(
+    r"(?i)(?:không\s+ghi\s+nhận|không\s+có|không|phủ\s+nhận|"
+    r"chưa\s+thấy|chưa\s+phát\s+hiện|âm\s+tính\s+với|"
+    r"without|denies|no\s+evidence\s+of)"
+    r"(?:\s+(?:được|bị|thấy|phát\s+hiện|ghi\s+nhận|có\s+dấu\s+hiệu|"
+    r"biểu\s+hiện|triệu\s+chứng\s+của)){0,3}\s*$"
+)
+HISTORICAL_RE = re.compile(
+    r"(?i)(?:tiền\s+sử|tiền\s+căn|trước\s+đây|đã\s+từng|có\s+lần|"
+    r"history\s+of|previously|past\s+medical\s+history)[^.!?;:\n]{0,60}$"
+)
+FAMILY_SECTION_RE = re.compile(r"(?i)tiền\s+sử\s+gia\s+đình|family\s+history")
+FAMILY_SUBJECT_RE = re.compile(
+    r"(?i)(?:mẹ|bố|cha|anh\s+trai|chị\s+gái|em\s+trai|em\s+gái|"
+    r"ông\s+(?:nội|ngoại)|bà\s+(?:nội|ngoại)|người\s+nhà|họ\s+hàng)"
+    r"(?:\s+(?:của\s+)?(?:bệnh\s+nhân|tôi|em|bạn|anh|chị))?"
+    r"\s+(?:bị|mắc|có|được\s+chẩn\s+đoán)[^.!?;:\n]{0,100}$"
+)
+ASSERTION_CUE_RE = re.compile(
+    r"(?i)\b(?:không\s+(?:có|ghi\s+nhận)|phủ\s+nhận|"
+    r"chưa\s+(?:thấy|phát\s+hiện)|âm\s+tính|tiền\s+sử|"
+    r"trước\s+đây|đã\s+từng|family\s+history|history\s+of)\b"
+)
+CONTRAST_RE = re.compile(r"(?i)\b(?:nhưng|tuy\s+nhiên|however|but)\b")
+CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;\n]")
+
+
+# The corpus writes headings as outline items: "1.  Tiền sử bệnh", "- Tiền sử
+# Thuyên tắc phổi". Stripping the marker is what lets the prefix rules below fire.
+LIST_MARKER_RE = re.compile(r"^(?:\d+\s*[.)]|[-–•*+]|[a-z]\s*[.)])\s*")
+
+
+def _normalize_heading(line: str) -> str:
+    normalized = line.strip().casefold()
+    while True:
+        stripped = LIST_MARKER_RE.sub("", normalized).strip()
+        if stripped == normalized:
+            return normalized
+        normalized = stripped
+
+
+def _section_at(text: str, position: int) -> str | None:
+    prefix = text[:position]
+    lines = prefix.splitlines()
+    for line in reversed(lines[-12:]):
+        normalized = _normalize_heading(line)
+        if not normalized:
+            continue
+        if "tiền sử bệnh hiện tại" in normalized or "bệnh sử hiện tại" in normalized:
+            return "current_history"
+        if "thuốc trước" in normalized or "danh sách thuốc trước" in normalized:
+            return "medication_history"
+        if "tiền sử gia đình" in normalized:
+            return "family_history"
+        if normalized.startswith("tiền sử") or "past medical history" in normalized:
+            return "past_history"
+        if "thuốc đang dùng" in normalized:
+            return "current_medication"
+        # Heading-shaped only. "được chẩn đoán đái tháo đường năm 2019" is prose,
+        # and matching it here would end the scan before reaching the real
+        # heading above it.
+        if normalized.startswith("chẩn đoán"):
+            return "diagnosis"
+    return None
+
+
+class AssertionDetector:
+    def has_context_cue(self, text: str, proposal: SpanProposal) -> bool:
+        prefix = text[max(0, proposal.start - 240) : proposal.start]
+        boundary = max(
+            [match.end() for match in CLAUSE_BOUNDARY_RE.finditer(prefix)]
+            + [prefix.rfind(",") + 1]
+        )
+        return bool(ASSERTION_CUE_RE.search(prefix[boundary:]))
+
+    def section_at(self, text: str, position: int) -> str | None:
+        return _section_at(text, position)
+
+    def detect(self, text: str, proposal: SpanProposal) -> list[Assertion]:
+        if proposal.type not in {
+            EntityType.SYMPTOM,
+            EntityType.DIAGNOSIS,
+            EntityType.MEDICATION,
+        }:
+            return []
+        assertions: set[Assertion] = set()
+        section = _section_at(text, proposal.start)
+        if section in {"medication_history", "past_history"}:
+            assertions.add(Assertion.HISTORICAL)
+        if section == "family_history":
+            assertions.add(Assertion.FAMILY)
+
+        window_start = max(0, proposal.start - 180)
+        prefix = text[window_start : proposal.start]
+        boundary = max(
+            [match.end() for match in CLAUSE_BOUNDARY_RE.finditer(prefix)] or [0]
+        )
+        clause_prefix = prefix[boundary:]
+        contrasts = list(CONTRAST_RE.finditer(clause_prefix))
+        if contrasts:
+            clause_prefix = clause_prefix[contrasts[-1].end() :]
+
+        if NEGATION_RE.search(clause_prefix):
+            assertions.add(Assertion.NEGATED)
+        if HISTORICAL_RE.search(clause_prefix):
+            assertions.add(Assertion.HISTORICAL)
+        if FAMILY_SUBJECT_RE.search(clause_prefix):
+            assertions.add(Assertion.FAMILY)
+
+        section_prefix = text[max(0, proposal.start - 500) : proposal.start]
+        if FAMILY_SECTION_RE.search(section_prefix) and section == "family_history":
+            assertions.add(Assertion.FAMILY)
+
+        order = [Assertion.NEGATED, Assertion.FAMILY, Assertion.HISTORICAL]
+        return [item for item in order if item in assertions]

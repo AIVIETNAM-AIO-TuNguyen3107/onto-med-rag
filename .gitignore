@@ -1,13 +1,38 @@
+.DS_Store
+.env
+.env.*
+!.env.example
 .venv/
-
-# Python cache
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 *.pyw
 *.pyz
+.pytest_cache/
+.ipynb_checkpoints/
 
-# PDF
+# PDF / LaTeX
 *.pdf
 *.synctex.gz
+
+# Competition/private data and generated outputs
+input/
+data/
+runs/
+artifacts/
+*.xlsx
+*.zip
+*.tar.gz
+*.log
+
+# Local credentials, paths, and model caches
+temporaryHFtoken.csv
+temporarytoken.csv
+configs/*.local.yaml
+.cache/
+huggingface/
+models/
+rxnorm/
+*.egg-info/

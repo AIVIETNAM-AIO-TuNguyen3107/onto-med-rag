@@ -1,0 +1,60 @@
+# Copy to configs/api_first5.local.yaml, then set the exact provider endpoint,
+# model ID, credential environment-variable name, and machine-local paths.
+paths:
+  input_dir: input
+  runs_dir: runs
+  artifacts_dir: artifacts
+  icd_source: "DM ICD10-19_8_BYT.xlsx"
+  icd_catalog: artifacts/icd10_tt06_vi.jsonl
+  icd_catalog_csv: artifacts/icd10_tt06_vi.csv
+  icd_catalog_manifest: artifacts/icd10_tt06_vi.manifest.json
+  icd_index: artifacts/icd_index.json
+  rxnorm_cache: artifacts/rxnorm_api_first5_cache.json
+  llm_cache: artifacts/llm_response_cache_api_first5.sqlite3
+
+entity_finding:
+  chunk_chars: 1400
+  chunk_overlap_chars: 160
+  ner_threshold: 0.35
+
+ner:
+  backend: gliner
+  model_id: Ihor/gliner-biomed-large-v1.0
+  local_files_only: true
+
+llm:
+  backend: openai_compatible
+  model_id: REPLACE_WITH_EXACT_MODEL_ID
+  endpoint: https://provider.example/v1
+  api_key_env: CLINICAL_LLM_API_KEY
+  reasoning_effort: high
+  send_reasoning_effort: true
+  reasoning_enabled: true
+  reasoning_exclude: true
+  reasoning_max_tokens: 1024
+  structured_outputs: true
+  max_concurrency: 2
+  decision_retries: 1
+  thinking: true
+  max_new_tokens: 4096
+  max_retries: 2
+  request_timeout_seconds: 600
+
+linking:
+  icd_max_candidates: 3
+  rxnorm_max_candidates: 3
+  retrieval_candidates: 20
+  use_rxnav_api: true
+  icd_min_score: 0.55
+  rxnorm_min_score: 0.45
+  auto_exact_score: 0.90
+  auto_single_score: 0.70
+  auto_top_score: 0.75
+  auto_score_margin: 0.25
+
+run:
+  fail_on_model_unavailable: true
+  pretty_json: true
+  llm_review_mode: selective
+  gliner_review_threshold: 0.65
+  review_context_chars: 240
