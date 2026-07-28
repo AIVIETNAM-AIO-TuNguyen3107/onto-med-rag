@@ -15,7 +15,7 @@
 "direct-extraction-offline-probe","2026-07-28","direct_extraction",100,2801,487,252,252,"local_complete",,,"Complete and lossless; local comparison only."
 "direct-extraction-v1","2026-07-28","direct_extraction",100,2801,487,277,277,"scored","artifacts/direct-extraction-v1.zip",35.7681,"Current best; all components improved."
 "direct-extraction-v2-strict","2026-07-28","direct_extraction",100,2477,428,806,806,"scored","artifacts/direct-extraction-v2-strict.zip",30.8855,"Confirmed regression; dropped 324 rows and forced 529 candidates."
-"direct-extraction-v3-force-keep","2026-07-28","direct_extraction",100,2801,487,806,806,"pending_submission","artifacts/direct-extraction-v3-force-keep.zip",,"Validated and packaged; not yet scored."
+"direct-extraction-v3-force-keep","2026-07-28","direct_extraction",100,2801,487,806,806,"scored","artifacts/direct-extraction-v3-force-keep.zip",33.7390,"Recovered V1 WER and assertions, but candidate score remained below V1."
 "luna-s3-smoke","2026-07-27","luna_consensus",3,100,1,20,20,"partial_or_smoke",,,"Smoke completed."
 "luna-s3-full","2026-07-28","luna_consensus",100,3594,279,417,450,"submission_unknown","submission-3-luna-consensus.zip",,"Complete package; submission status cannot be inferred."
 "luna-s4-recovery","2026-07-28","luna_recovery",100,3663,283,418,451,"submission_unknown","submission-4-luna-recovery.zip",,"Complete package; submission status cannot be inferred."

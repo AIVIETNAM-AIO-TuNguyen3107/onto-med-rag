@@ -1,24 +1,25 @@
-# ViettelAIrace project status — 2026-07-28
+# ViettelAIrace project status — 2026-07-29
 
 ## Executive status
 
-The best confirmed leaderboard submission is **Direct V1 at 35.7681**.
-Direct V2 strict was submitted and scored **30.8855**, so it is a confirmed
-regression rather than an unknown result. Direct V3 force-keep is finished,
-independently validated, and packaged, but was not submitted because the daily
-submission quota was exhausted.
+The best confirmed leaderboard submission remains **Direct V1 at 35.7681**.
+Direct V2 strict scored **30.8855** and Direct V3 force-keep scored **33.7390**.
+Both are confirmed regressions, not unknown results.
 
-The next controlled test is the existing Direct V3 ZIP, unchanged:
+Direct V3 was submitted unchanged after the quota reset:
 
 - Path: `artifacts/direct-extraction-v3-force-keep.zip`
 - SHA-256: `907b7150c46fce4b43bef64cb36f2875e26ce15d2c53581436f457fed56c4c7c`
 - Size: 89,549 bytes
 - Members: `1.json` through `100.json`, with no containing directory
-- Status: `pending_submission`
+- Status: `scored`
+- WER: `60.5734` (`num_scored=100`)
+- J_assertion: `46.3932` (`num_records=100`)
+- J_candidates: `19.9827`
+- Final: `33.7390`
 
-Do not rebuild this archive before submission. Submit the recorded bytes and
-copy the complete metric block into the experiment ledger. Direct V1 remains the
-canonical best unless V3 exceeds 35.7681.
+The submitted archive retains its recorded checksum. Direct V1 remains the
+canonical best because V3 scored 2.0291 points lower.
 
 ## Confirmed leaderboard results
 
@@ -34,6 +35,7 @@ The final score is:
 | audited assertions | 66.9345 | 33.0655 | 37.6352 | 20.9721 | 29.5991 | Claude session `24dbd004…`, 2026-07-27 08:09Z |
 | **Direct V1** | **60.5734** | **39.4266** | **46.3932** | **25.0554** | **35.7681** | Claude session `dd69f5a0…`, 2026-07-28 09:21Z |
 | Direct V2 strict | 63.1095 | 36.8905 | 43.3089 | 17.0643 | 30.8855 | Repo-agent transcript, 2026-07-28 10:58Z |
+| Direct V3 force-keep | 60.5734 | 39.4266 | 46.3932 | 19.9827 | 33.7390 | Competition portal result reported by the user, 2026-07-29 |
 
 The archived Claude transcript ends after Direct V1. The Direct V2 metric block
 was recorded immediately after its implementation in the July 28 repo-agent
@@ -62,11 +64,21 @@ linker retrieved no code. Compared with Direct V1:
 This establishes that the V2 bundle was harmful, but does not isolate which
 change caused how much of the loss.
 
-Direct V3 is the clean follow-up to V2. It keeps V2's reviewed corrections,
-strict field omission, and 806 linked rows, but restores all 324 rows V2
-dropped. Thus V2 → V3 isolates the effect of retaining unresolved linkable
-entities. V1 → V3 still combines multiple changes and should not be described
-as a single-variable comparison.
+Direct V3 was the clean follow-up to V2. It kept V2's reviewed corrections,
+strict field omission, and 806 linked rows, but restored all 324 rows V2
+dropped. Compared with V2:
+
+- WER recovered by 2.5361 points and exactly matched V1.
+- J_assertion recovered by 3.0843 points and exactly matched V1.
+- J_candidates improved by 2.9184 points but remained 5.0727 below V1.
+- Final improved by 2.8535 points but remained 2.0291 below V1.
+
+This is strong evidence that dropping the 324 unresolved rows caused V2's text
+and assertion regressions. Retaining them fixed those components. The remaining
+loss versus V1 is entirely in candidate scoring, so V2/V3's force-top candidate
+bundle and corrections should not replace V1. V1 → V3 still combines candidate
+and correction changes, so this leaderboard result cannot attribute the
+candidate loss to one individual change.
 
 ## Current pipeline
 
@@ -113,7 +125,7 @@ The three direct variants are:
 |---|---:|---:|---:|---|---|
 | Direct V1 | 2,801 | 487 | 277 | conservative linking, original serialization | **35.7681** |
 | Direct V2 strict | 2,477 | 428 | 806 | force top; drop 324 no-hit rows | 30.8855 |
-| Direct V3 force-keep | 2,801 | 487 | 806 | force top; retain 324 no-hit rows | pending |
+| Direct V3 force-keep | 2,801 | 487 | 806 | force top; retain 324 no-hit rows | 33.7390 |
 
 ## Trial history
 
@@ -130,6 +142,8 @@ The three direct variants are:
   spans produced the first WER improvement and remains best.
 - Direct V2 strict: 30.8855. Dropping no-hit entities plus forcing candidates
   regressed all three components.
+- Direct V3 force-keep: 33.7390. Restoring the 324 dropped rows recovered WER
+  and J_assertion to V1 exactly, but candidate scoring remained below V1.
 
 ### Complete or packaged without a confirmed score
 
@@ -137,7 +151,6 @@ The three direct variants are:
   not submitted after review.
 - `direct-extraction-offline-probe`: complete local comparison; 252 linked rows,
   not a leaderboard submission.
-- `direct-extraction-v3-force-keep`: complete, validated, packaged, pending quota.
 - `luna-s3-full`: complete 100-document Luna consensus package; portal status is
   not present in the local evidence.
 - `luna-s4-recovery`: complete 100-document miss-recovery package; portal status
@@ -188,19 +201,20 @@ belong in Git. They are archived separately in the team Drive handoff.
 
 > Current best is Direct V1 at 35.7681. Direct V2 strict was submitted and
 > scored 30.8855, so dropping unresolved entities and forcing more top
-> candidates was harmful overall. Direct V3 is finished, validated, and
-> packaged, but has not been submitted because today's quota was exhausted. V3
-> restores the 324 entities dropped by V2 while retaining V2's 806 linked
-> entities and corrections, making it the next controlled leaderboard test. The
-> current implementation and tests are being handed off on
+> candidates was harmful overall. Direct V3 was then submitted unchanged and
+> scored 33.7390. Restoring V2's 324 dropped entities recovered WER and
+> J_assertion exactly to V1 levels, but J_candidates remained lower at 19.9827.
+> Direct V1 therefore remains the best submission. The current implementation
+> and tests are being handed off on
 > `handoff/direct-extraction-20260728`; 185 tests and the dependency lock check
 > pass. Older GLiNER/Qwen, recall, and Luna experiments are recorded in the
 > experiment ledger.
 
 ## Immediate next actions
 
-1. Submit the unchanged Direct V3 archive after the quota resets.
-2. Record WER, `num_scored`, J_assertion, `num_records`, J_candidates, final
-   score, submission time, and a portal screenshot/reference.
-3. Promote V3 only if it exceeds 35.7681; otherwise retain Direct V1 as best.
-4. Do not combine another pipeline change with the V3 submission.
+1. Retain Direct V1 as `BEST_SCORED`; keep V2 and V3 in scored history.
+2. Preserve the portal screenshot/reference for V3 alongside the reported
+   metrics if one is available.
+3. Isolate candidate-policy changes locally before spending another submission:
+   start from V1 spans/assertions and change only one linking component.
+4. Do not use V2/V3's force-top candidate bundle as the new default.

@@ -359,11 +359,19 @@
       "candidate_identifiers": 806,
       "artifact": "artifacts/direct-extraction-v3-force-keep.zip",
       "sha256": "907b7150c46fce4b43bef64cb36f2875e26ce15d2c53581436f457fed56c4c7c",
-      "submission_state": "pending_submission",
-      "metrics": null,
-      "evidence": "Manifest, audit, independent validation, and user confirmation of quota exhaustion.",
-      "outcome": "Validated and packaged; not yet scored.",
-      "next_action": "Submit unchanged after quota reset, then record all metrics."
+      "submission_state": "scored",
+      "submission_date": "2026-07-29",
+      "metrics": {
+        "wer": 60.5734,
+        "j_assertion": 46.3932,
+        "j_candidates": 19.9827,
+        "final": 33.739,
+        "num_scored": 100,
+        "num_records": 100
+      },
+      "evidence": "Competition portal result reported by the user on 2026-07-29; archive manifest and independent validation preserve the submitted bytes.",
+      "outcome": "Recovered V1 WER and assertion performance exactly, but candidate quality remained 5.0727 points below V1; final score was 2.0291 below the best.",
+      "next_action": "Keep in scored history. Retain V1 as best and isolate candidate-policy changes before another submission."
     },
     {
       "run_id": "luna-s3-smoke",
