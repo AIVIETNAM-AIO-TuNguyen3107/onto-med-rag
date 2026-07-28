@@ -34,3 +34,5 @@ configs/*.local.yaml
 .cache/
 huggingface/
 models/
+rxnorm/
+*.egg-info/
